@@ -18,3 +18,13 @@ npm run dev   # http://localhost:3000
 | `/releases/run` | Simulated live run after clicking Publish (stands in for SSE, REL-5) |
 | `/tokens` | Linked machines with revoke, GitHub App installations |
 | `/link` | Device-code confirmation page for `npx npxhub` (Journey A) |
+
+## Hosting on Firebase App Hosting
+
+App Hosting builds and runs the Next.js server as-is. It requires the Blaze plan.
+
+1. Firebase console → **App Hosting** → **Create backend**.
+2. Connect GitHub repo `RupertCloud/NPX-GUI`, set **root directory** to `apps/web`, live branch `main`.
+3. Finish the wizard; the first rollout starts automatically and every push to `main` redeploys.
+
+Scaling limits live in `apphosting.yaml`. CLI alternative: `firebase apphosting:backends:create --project <id>`.
