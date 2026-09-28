@@ -1,0 +1,5 @@
+# Firebase App Hosting settings. Backend root directory: apps/web
+# https://firebase.google.com/docs/app-hosting/configure
+runConfig:
+  minInstances: 0 # scale to zero when idle
+  maxInstances: 2 # cost cap while the app only serves mock data
