@@ -1,21 +1,23 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { useTheme } from "next-themes"
-import { History, KeyRound, Moon, Package, Rocket, Sun, Terminal } from "lucide-react"
+import { signOut } from "firebase/auth"
+import { History, LogOut, Moon, Package, Rocket, Settings, Sun, Terminal } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { currentUser } from "@/lib/mock-data"
+import { auth } from "@/lib/firebase/client"
 
 const nav = [
   { href: "/packages", label: "Packages", icon: Package },
   { href: "/publish", label: "Publish", icon: Rocket },
   { href: "/releases", label: "Releases", icon: History },
-  { href: "/tokens", label: "Tokens & orgs", icon: KeyRound },
+  { href: "/settings", label: "Settings", icon: Settings },
 ]
 
-export function AppSidebar() {
+export function AppSidebar({ login, avatarUrl }: { login: string; avatarUrl: string }) {
   const pathname = usePathname()
+  const router = useRouter()
   const { resolvedTheme, setTheme } = useTheme()
 
   return (
@@ -49,20 +51,33 @@ export function AppSidebar() {
       </nav>
       <div className="mt-auto hidden items-center justify-between gap-2 border-t border-sidebar-border px-4 py-3 md:flex">
         <div className="flex items-center gap-2 text-sm">
-          <span className="grid size-7 place-items-center rounded-full bg-accent font-medium">
-            {currentUser.name[0]}
-          </span>
-          @{currentUser.login}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={avatarUrl} alt="" className="size-7 rounded-full" />
+          @{login}
         </div>
-        <button
-          type="button"
-          onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-          aria-label="Toggle dark mode"
-        >
-          <Sun className="hidden size-4 dark:block" />
-          <Moon className="size-4 dark:hidden" />
-        </button>
+        <div className="flex">
+          <button
+            type="button"
+            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+            aria-label="Toggle dark mode"
+          >
+            <Sun className="hidden size-4 dark:block" />
+            <Moon className="size-4 dark:hidden" />
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              await signOut(auth)
+              await fetch("/api/session", { method: "DELETE" })
+              router.replace("/login")
+            }}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+            aria-label="Sign out"
+          >
+            <LogOut className="size-4" />
+          </button>
+        </div>
       </div>
     </aside>
   )

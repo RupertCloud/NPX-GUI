@@ -2,4 +2,12 @@
 # https://firebase.google.com/docs/app-hosting/configure
 runConfig:
   minInstances: 0 # scale to zero when idle
-  maxInstances: 2 # cost cap while the app only serves mock data
+  maxInstances: 2
+
+env:
+  # 32 random bytes, base64. Encrypts users' GitHub tokens in Firestore.
+  # Create once: openssl rand -base64 32 | firebase apphosting:secrets:set npxhub-token-key --data-file=-
+  - variable: TOKEN_ENCRYPTION_KEY
+    secret: npxhub-token-key
+    availability:
+      - RUNTIME
