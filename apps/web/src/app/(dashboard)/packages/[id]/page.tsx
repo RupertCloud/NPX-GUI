@@ -14,11 +14,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { getPackage, listReleases, roleOf } from "@/lib/data"
 import { compactNumber, timeAgo } from "@/lib/format"
-import { getFile, hasRepoSecret } from "@/lib/github"
+import { getFile, getPull, hasRepoSecret, pullNumber } from "@/lib/github"
 import { getNpmInfo } from "@/lib/npm"
 import { requireUser } from "@/lib/session"
-import { WORKFLOW_PATH } from "@/lib/workflow"
-import { addMember, openWorkflowPrAction, removeMember, removePackage, setNpmToken } from "../../actions"
+import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
+import { addMember, mergeWorkflowPr, openWorkflowPrAction, removeMember, removePackage, setNpmToken } from "../../actions"
 
 const selectClass =
   "h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
@@ -35,6 +35,9 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
     hasRepoSecret(user.githubToken, pkg.repo, "NPM_TOKEN").catch(() => null),
     listReleases([pkg.id]),
   ])
+  const workflowCurrent = isCurrentWorkflow(workflow)
+  const prNumber = pkg.workflowPrUrl ? pullNumber(pkg.workflowPrUrl, pkg.repo) : null
+  const pr = !workflowCurrent && prNumber ? await getPull(user.githubToken, pkg.repo, prNumber).catch(() => null) : null
   const deprecate = `npm deprecate ${pkg.npmName}@"<version>" "<message>"`
 
   return (
@@ -102,27 +105,40 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
           <CardDescription>Two things must be in place before the first release.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <SetupRow done={!!workflow} title="1. Publish workflow on the default branch">
-            {workflow ? (
+          <SetupRow done={workflowCurrent} title="1. Current publish workflow on the default branch">
+            {workflowCurrent ? (
               <span className="font-mono">{WORKFLOW_PATH}</span>
             ) : (
               <div className="space-y-2">
-                {pkg.workflowPrUrl ? (
-                  <p>
-                    Merge{" "}
-                    <a href={pkg.workflowPrUrl} className="underline" target="_blank" rel="noreferrer">
-                      the npxhub workflow PR
-                    </a>{" "}
-                    on {pkg.repo}.
-                  </p>
-                ) : (
-                  <p>No workflow PR yet.</p>
-                )}
-                <ActionForm action={openWorkflowPrAction.bind(null, pkg.id)}>
-                  <SubmitButton variant="outline" size="sm">
-                    {pkg.workflowPrUrl ? "Open a new PR" : "Open workflow PR"}
-                  </SubmitButton>
-                </ActionForm>
+                <p>
+                  {workflow
+                    ? "The workflow in this repo is an older version with known bugs. "
+                    : "The workflow isn't on the default branch yet. "}
+                  {pr?.state === "open" ? (
+                    <>
+                      <a href={pr.html_url} className="underline" target="_blank" rel="noreferrer">
+                        PR #{pr.number}
+                      </a>{" "}
+                      is ready to merge.
+                    </>
+                  ) : (
+                    "Open a PR to add the current version."
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {pr?.state === "open" && (
+                    <ActionForm action={mergeWorkflowPr.bind(null, pkg.id)}>
+                      <SubmitButton size="sm">Merge PR #{pr.number}</SubmitButton>
+                    </ActionForm>
+                  )}
+                  {pr?.state !== "open" && (
+                    <ActionForm action={openWorkflowPrAction.bind(null, pkg.id)}>
+                      <SubmitButton variant="outline" size="sm">
+                        {workflow ? "Open update PR" : "Open workflow PR"}
+                      </SubmitButton>
+                    </ActionForm>
+                  )}
+                </div>
               </div>
             )}
           </SetupRow>

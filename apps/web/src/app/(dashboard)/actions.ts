@@ -8,6 +8,7 @@ import {
   deletePackage,
   findPackageByName,
   getPackage,
+  getRelease,
   roleOf,
   setMember,
   updatePackage,
@@ -15,10 +16,22 @@ import {
   type Package,
   type Role,
 } from "@/lib/data"
-import { dispatchWorkflow, getGitHubUser, getPackageJson, getRepo, GitHubError, openWorkflowPr, setRepoSecret } from "@/lib/github"
+import {
+  dispatchWorkflow,
+  getFile,
+  getGitHubUser,
+  getPackageJson,
+  getRepo,
+  GitHubError,
+  mergePull,
+  openWorkflowPr,
+  pullNumber,
+  setRepoSecret,
+} from "@/lib/github"
 import { getNpmInfo } from "@/lib/npm"
 import { compare, gitTagFor, isValidDistTag, isValidVersion } from "@/lib/release"
 import { requireUser, type User } from "@/lib/session"
+import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
 
 export type ActionResult = { error?: string; ok?: string } | undefined
 
@@ -72,8 +85,26 @@ export async function openWorkflowPrAction(id: string): Promise<ActionResult> {
     const url = await openWorkflowPr(user.githubToken, pkg.repo, pkg.defaultBranch)
     if (url) await updatePackage(id, { workflowPrUrl: url })
     revalidatePath(`/packages/${id}`)
-    return { ok: url ? "Pull request opened" : "The workflow is already on the default branch" }
+    return { ok: url ? "Pull request opened" : "The current workflow is already on the default branch" }
   } catch (e) {
+    return { error: message(e) }
+  }
+}
+
+// Merges npxhub's own workflow PR from the dashboard.
+export async function mergeWorkflowPr(id: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const pkg = await packageFor(user, id)
+    const number = pkg.workflowPrUrl ? pullNumber(pkg.workflowPrUrl, pkg.repo) : null
+    if (!number) return { error: "No npxhub workflow PR to merge" }
+    await mergePull(user.githubToken, pkg.repo, number)
+    revalidatePath(`/packages/${id}`)
+    return { ok: "Merged" }
+  } catch (e) {
+    if (e instanceof GitHubError && (e.status === 405 || e.status === 409)) {
+      return { error: `GitHub couldn't merge it: ${e.message}. Check the PR's required reviews or checks on GitHub.` }
+    }
     return { error: message(e) }
   }
 }
@@ -131,57 +162,89 @@ export async function removePackage(id: string) {
   redirect("/packages")
 }
 
+type ReleaseInput = { version: string; distTag: string; branch: string; notes: string }
+
+// Validates, records and dispatches a release. Returns the new release id or an error.
+async function launchRelease(user: User, pkg: Package, input: ReleaseInput): Promise<{ id: string } | { error: string }> {
+  const { version, distTag, branch, notes } = input
+  // Validate server-side before anything reaches the runner (SEC-3, REL-2).
+  if (!isValidVersion(version)) return { error: "Not a valid semver version" }
+  if (!isValidDistTag(distTag)) return { error: "Not a valid dist-tag" }
+  if (distTag === "latest" && version.includes("-")) return { error: "Prereleases go to a non-latest dist-tag" }
+  const npm = await getNpmInfo(pkg.npmName)
+  if (npm.exists) {
+    const current = npm.distTags[distTag] ?? npm.latest
+    if (current && compare(version, current) <= 0) return { error: `Must be greater than ${current}` }
+  }
+
+  const gitTag = gitTagFor(pkg.npmName, pkg.directory, version)
+  const created = await createRelease({
+    packageId: pkg.id,
+    npmName: pkg.npmName,
+    repo: pkg.repo,
+    version,
+    distTag,
+    gitTag,
+    branch,
+    notes,
+    status: "queued",
+    startedBy: user.login,
+    startedAt: new Date().toISOString(),
+  })
+  if ("active" in created) return { error: `${pkg.npmName}@${created.active.version} is still releasing; wait for it to finish` }
+
+  try {
+    await dispatchWorkflow(user.githubToken, pkg.repo, branch, {
+      version,
+      tag: distTag,
+      git_tag: gitTag,
+      directory: pkg.directory,
+      notes,
+      provenance: !pkg.private,
+      release_id: created.id,
+    })
+    await updateRelease(created.id, { status: "running" })
+  } catch (e) {
+    await updateRelease(created.id, { status: "failed", error: message(e), finishedAt: new Date().toISOString() })
+  }
+  return { id: created.id }
+}
+
 export async function startRelease(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
   let releaseId: string
   try {
     const user = await requireUser()
     const pkg = await packageFor(user, String(formData.get("packageId")))
-    const version = String(formData.get("version") ?? "").trim()
-    const distTag = String(formData.get("tag") ?? "").trim()
-    const branch = String(formData.get("branch") ?? pkg.defaultBranch)
-    const notes = String(formData.get("notes") ?? "").slice(0, 20_000)
-
-    // Validate server-side before anything reaches the runner (SEC-3, REL-2).
-    if (!isValidVersion(version)) return { error: "Not a valid semver version" }
-    if (!isValidDistTag(distTag)) return { error: "Not a valid dist-tag" }
-    if (distTag === "latest" && version.includes("-")) return { error: "Prereleases go to a non-latest dist-tag" }
-    const npm = await getNpmInfo(pkg.npmName)
-    if (npm.exists) {
-      const current = npm.distTags[distTag] ?? npm.latest
-      if (current && compare(version, current) <= 0) return { error: `Must be greater than ${current}` }
-    }
-
-    const gitTag = gitTagFor(pkg.npmName, pkg.directory, version)
-    const created = await createRelease({
-      packageId: pkg.id,
-      npmName: pkg.npmName,
-      repo: pkg.repo,
-      version,
-      distTag,
-      gitTag,
-      branch,
-      notes,
-      status: "queued",
-      startedBy: user.login,
-      startedAt: new Date().toISOString(),
+    const result = await launchRelease(user, pkg, {
+      version: String(formData.get("version") ?? "").trim(),
+      distTag: String(formData.get("tag") ?? "").trim(),
+      branch: String(formData.get("branch") ?? pkg.defaultBranch),
+      notes: String(formData.get("notes") ?? "").slice(0, 20_000),
     })
-    if ("active" in created) return { error: `${pkg.npmName}@${created.active.version} is still releasing; wait for it to finish` }
-    releaseId = created.id
+    if ("error" in result) return result
+    releaseId = result.id
+  } catch (e) {
+    return { error: message(e) }
+  }
+  redirect(`/releases/${releaseId}`)
+}
 
-    try {
-      await dispatchWorkflow(user.githubToken, pkg.repo, branch, {
-        version,
-        tag: distTag,
-        git_tag: gitTag,
-        directory: pkg.directory,
-        notes,
-        provenance: !pkg.private,
-        release_id: releaseId,
-      })
-      await updateRelease(releaseId, { status: "running" })
-    } catch (e) {
-      await updateRelease(releaseId, { status: "failed", error: message(e), finishedAt: new Date().toISOString() })
+// Runs a failed or cancelled release again with the same version, tag, branch and notes.
+export async function retryRelease(id: string): Promise<ActionResult> {
+  let releaseId: string
+  try {
+    const user = await requireUser()
+    const previous = await getRelease(id)
+    const pkg = previous && (await getPackage(user, previous.packageId))
+    if (!previous || !pkg) return { error: "Release not found" }
+    if (previous.status !== "failed" && previous.status !== "cancelled")
+      return { error: "Only failed or cancelled releases can be retried" }
+    if (!isCurrentWorkflow(await getFile(user.githubToken, pkg.repo, WORKFLOW_PATH, previous.branch))) {
+      return { error: "The publish workflow on this branch is missing or outdated. Update it from the package page, then retry." }
     }
+    const result = await launchRelease(user, pkg, previous)
+    if ("error" in result) return result
+    releaseId = result.id
   } catch (e) {
     return { error: message(e) }
   }

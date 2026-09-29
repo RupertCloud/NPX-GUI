@@ -1,6 +1,6 @@
 import "server-only"
 import sodium from "libsodium-wrappers"
-import { WORKFLOW_FILE, WORKFLOW_PATH, WORKFLOW_YAML } from "./workflow"
+import { isCurrentWorkflow, WORKFLOW_FILE, WORKFLOW_PATH, WORKFLOW_YAML } from "./workflow"
 
 const API = "https://api.github.com"
 
@@ -79,33 +79,53 @@ export async function getPackageJson(token: string, repo: string, directory: str
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : null
 }
 
-// Opens a PR adding the publish workflow (GH-3). Returns null when it is already on the base branch.
+// Opens a PR adding or updating the publish workflow (GH-3). Returns null when the current version is already on base.
 export async function openWorkflowPr(token: string, repo: string, base: string): Promise<string | null> {
-  if (await getFile(token, repo, WORKFLOW_PATH, base)) return null
+  const existing = await getFile(token, repo, WORKFLOW_PATH, base)
+  if (isCurrentWorkflow(existing)) return null
   const { object } = await gh<{ object: { sha: string } }>(token, `/repos/${repo}/git/ref/heads/${encodeURIComponent(base)}`)
   const branch = `npxhub/setup-${Date.now()}`
   await gh(token, `/repos/${repo}/git/refs`, {
     method: "POST",
     body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: object.sha }),
   })
+  // Updating a file needs its current blob sha.
+  const sha = existing
+    ? (await gh<{ sha: string }>(token, `/repos/${repo}/contents/${WORKFLOW_PATH}?ref=${encodeURIComponent(branch)}`)).sha
+    : undefined
   await gh(token, `/repos/${repo}/contents/${WORKFLOW_PATH}`, {
     method: "PUT",
     body: JSON.stringify({
-      message: "ci: add npxhub publish workflow",
+      message: existing ? "ci: update npxhub publish workflow" : "ci: add npxhub publish workflow",
       content: Buffer.from(WORKFLOW_YAML).toString("base64"),
       branch,
+      sha,
     }),
   })
   const pr = await gh<{ html_url: string }>(token, `/repos/${repo}/pulls`, {
     method: "POST",
     body: JSON.stringify({
-      title: "Add npxhub publish workflow",
+      title: existing ? "Update npxhub publish workflow" : "Add npxhub publish workflow",
       head: branch,
       base,
-      body: "Adds `.github/workflows/npxhub-publish.yml`, which npxhub runs to publish releases of this package to npm.\n\nThe workflow reads the `NPM_TOKEN` repository secret that npxhub sets when you add your npm token.",
+      body: "Adds or updates `.github/workflows/npxhub-publish.yml`, which npxhub runs to publish releases of this package to npm.\n\nThe workflow reads the `NPM_TOKEN` repository secret that npxhub sets when you add your npm token.",
     }),
   })
   return pr.html_url
+}
+
+export type PullState = { number: number; state: "open" | "closed"; merged: boolean; mergeable: boolean | null; html_url: string }
+
+export const getPull = (token: string, repo: string, number: number) => gh<PullState>(token, `/repos/${repo}/pulls/${number}`)
+
+// Merges a PR as the signed-in user; GitHub's branch protection and permissions still apply.
+export async function mergePull(token: string, repo: string, number: number) {
+  await gh(token, `/repos/${repo}/pulls/${number}/merge`, { method: "PUT", body: JSON.stringify({ merge_method: "squash" }) })
+}
+
+export function pullNumber(url: string, repo: string): number | null {
+  const m = new RegExp(`^https://github\\.com/${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/pull/(\\d+)$`, "i").exec(url)
+  return m ? Number(m[1]) : null
 }
 
 // Stores the npm token as an encrypted Actions secret. npxhub itself never keeps it.
