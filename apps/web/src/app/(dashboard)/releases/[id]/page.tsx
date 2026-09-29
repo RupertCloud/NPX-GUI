@@ -3,6 +3,7 @@ import { ReleaseView } from "@/components/release-view"
 import { getPackage, getRelease } from "@/lib/data"
 import { getJobLog, getRunJob } from "@/lib/github"
 import { syncRelease } from "@/lib/release-sync"
+import { latestJob, toJobView } from "@/lib/jobs"
 import { requireUser } from "@/lib/session"
 
 export default async function ReleasePage({ params }: { params: Promise<{ id: string }> }) {
@@ -17,5 +18,6 @@ export default async function ReleasePage({ params }: { params: Promise<{ id: st
     const text = job ? await getJobLog(user.githubToken, release.repo, job.id) : null
     log = text ? text.split("\n").slice(-300).join("\n") : null
   }
-  return <ReleaseView initial={release} log={log} />
+  const fixJob = await latestJob("fix", release.id)
+  return <ReleaseView initial={release} log={log} fixJob={fixJob ? toJobView(fixJob) : null} />
 }

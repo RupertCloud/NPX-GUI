@@ -21,14 +21,18 @@ export const getUser = cache(async (): Promise<User | null> => {
   if (!token) return null
   try {
     const { uid } = await adminAuth.verifyIdToken(token)
-    const snap = await db.collection("users").doc(uid).get()
-    const u = snap.data()
-    if (!u?.githubTokenEnc) return null
-    return { uid, login: u.login, name: u.name, avatarUrl: u.avatarUrl, githubToken: decrypt(u.githubTokenEnc) }
+    return await userById(uid)
   } catch {
     return null
   }
 })
+
+// Loads a user without a session, for background jobs acting on the user's behalf.
+export async function userById(uid: string): Promise<User | null> {
+  const u = (await db.collection("users").doc(uid).get()).data()
+  if (!u?.githubTokenEnc) return null
+  return { uid, login: u.login, name: u.name, avatarUrl: u.avatarUrl, githubToken: decrypt(u.githubTokenEnc) }
+}
 
 export async function requireUser(): Promise<User> {
   const user = await getUser()

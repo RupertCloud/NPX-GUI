@@ -1,6 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
+import { headers } from "next/headers"
 import { redirect } from "next/navigation"
 import {
   createPackage,
@@ -36,8 +37,7 @@ import { FieldValue } from "firebase-admin/firestore"
 import { checkBaseUrl, DEFAULT_MODEL, getAiSettings, testAi, type StoredAiSettings } from "@/lib/ai"
 import { encrypt } from "@/lib/crypto"
 import { db } from "@/lib/firebase/admin"
-import { suggestFix } from "@/lib/fix"
-import { aiLaunchConfig, detectLaunchConfig, openLauncherPr, repoContext, validateLaunchConfig } from "@/lib/launcher"
+import { createJob, kickOff, type JobKind } from "@/lib/jobs"
 
 export type ActionResult = { error?: string; ok?: string } | undefined
 
@@ -116,23 +116,30 @@ export async function mergePackagePr(id: string, kind: "workflow" | "launcher"):
   }
 }
 
-// Opens a PR that makes the package runnable with npx. Uses the user's AI provider when set, rules otherwise.
+// Where this server is reachable, for starting background jobs on it.
+async function origin() {
+  const h = await headers()
+  const host = h.get("x-forwarded-host") ?? h.get("host")
+  const proto = h.get("x-forwarded-proto") ?? (host?.startsWith("localhost") ? "http" : "https")
+  return `${proto}://${host}`
+}
+
+async function startJob(user: User, kind: JobKind, target: string, packageId: string): Promise<ActionResult> {
+  const job = await createJob(user, kind, target, packageId)
+  if ("active" in job) return { ok: "Already running. It continues in the background." }
+  await kickOff(job.id, await origin())
+  return { ok: "Started. It keeps running if you leave or refresh this page." }
+}
+
+// Starts a background job that opens a PR making the package runnable with npx.
 export async function makeRunnable(id: string): Promise<ActionResult> {
   try {
     const user = await requireUser()
     const pkg = await packageFor(user, id)
-    const { raw, paths, readme } = await repoContext(user.githubToken, pkg)
-    if (!raw) return { error: "No package.json found on the default branch" }
-    const manifest = JSON.parse(raw)
-    if (manifest.bin) return { error: "This package already has a bin, so npx can run it" }
-    const ai = await getAiSettings(user.uid)
-    const config = ai ? await aiLaunchConfig(ai, manifest, paths, readme) : detectLaunchConfig(manifest)
-    const invalid = validateLaunchConfig(config, manifest)
-    if (invalid) return { error: `${ai ? "The AI's" : "The"} launcher config was rejected: ${invalid}` }
-    const url = await openLauncherPr(user.githubToken, pkg, raw, config, ai ? "ai" : "rules")
-    await updatePackage(id, { launcherPrUrl: url })
+    const result = await startJob(user, "launcher", pkg.id, pkg.id)
     revalidatePath(`/packages/${id}`)
-    return { ok: `Launcher PR opened${ai ? " (configured with AI)" : ""}` }
+    revalidatePath("/packages")
+    return result
   } catch (e) {
     return { error: message(e) }
   }
@@ -187,7 +194,7 @@ export async function testAiSettings(): Promise<ActionResult> {
   }
 }
 
-// Asks the user's AI provider to diagnose a failed release and, when it can, opens a fix PR.
+// Starts a background job: the user's AI provider diagnoses a failed release and, when it can, opens a fix PR.
 export async function suggestReleaseFix(id: string): Promise<ActionResult> {
   try {
     const user = await requireUser()
@@ -195,12 +202,12 @@ export async function suggestReleaseFix(id: string): Promise<ActionResult> {
     const pkg = release && (await getPackage(user, release.packageId))
     if (!release || !pkg) return { error: "Release not found" }
     if (release.status !== "failed") return { error: "Only failed releases can be diagnosed" }
-    const ai = await getAiSettings(user.uid)
-    if (!ai) return { error: "Add an AI provider in Settings first" }
-    const fix = await suggestFix(user.githubToken, ai, pkg, release)
-    await updateRelease(id, { fix })
+    if (!release.runId) return { error: "This release never reached GitHub Actions, so there is no log to read" }
+    if (!(await getAiSettings(user.uid))) return { error: "Add an AI provider in Settings first" }
+    const result = await startJob(user, "fix", release.id, pkg.id)
     revalidatePath(`/releases/${id}`)
-    return { ok: fix.prUrl ? "Fix PR opened" : "Diagnosis ready; no file changes proposed" }
+    revalidatePath("/packages")
+    return result
   } catch (e) {
     return { error: message(e) }
   }
