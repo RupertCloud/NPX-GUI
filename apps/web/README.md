@@ -31,6 +31,12 @@ Firestore, and GitHub Actions for the actual publish.
   running when the page is refreshed or closed; pages poll the job and show the result. A job that stops reporting
   for 15 minutes is shown as failed and can be started again. Each job keeps a log (steps, the AI's streamed output,
   and Claude's summarized reasoning on Anthropic's API), shown in a collapsible **Console** under the job.
+- **Live release console:** workflow v3 runs each step through a small log helper that mirrors output to the GitHub
+  log and sends it to `/api/releases/<id>/log` every 2 seconds (per-release HMAC token, only accepted while the release
+  runs). Values of env vars named like TOKEN/SECRET/PASSWORD/KEY are replaced with `***` before sending.
+- **Applying AI fixes:** the AI proposes edits to files the job log mentions, or new files inside the package (never
+  `.github/`). The release page shows each change; **Commit to <branch> & retry** commits them as one commit and
+  releases again, **Open PR** opens a PR, then **Merge & retry** or **Merge only**.
 - **Streaming AI calls:** both provider types stream their responses, so proxies such as Cloudflare don't cut long
   requests off with HTTP 524; OpenAI-compatible calls retry once on 502/503/524.
 - **Registry data** (versions, dist-tags, downloads, provenance) comes from the public npm APIs.

@@ -145,6 +145,7 @@ async function runFix(user: User, pkg: NonNullable<Awaited<ReturnType<typeof get
   if (!ai) throw new Error("Add an AI provider in Settings first")
   const fix = await suggestFix(user.githubToken, ai, pkg, release, log)
   await updateRelease(releaseId, { fix })
-  return { url: fix.prUrl ?? null, message: fix.prUrl ? "Fix PR opened" : "Diagnosis ready; no file changes proposed" }
+  const n = fix.edits.length
+  return { url: null, message: n ? `Diagnosis ready: ${n} file ${n === 1 ? "change" : "changes"} proposed. Review and apply below.` : "Diagnosis ready; no file changes proposed" }
 }
 

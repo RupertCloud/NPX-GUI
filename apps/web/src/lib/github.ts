@@ -128,26 +128,33 @@ export function pullNumber(url: string, repo: string): number | null {
   return m ? Number(m[1]) : null
 }
 
-// A branch from `base` with the given files committed, and a PR for it. Returns the PR URL.
+// Commits files to an existing branch as one commit. Fails if branch protection doesn't allow direct pushes.
+export async function commitFiles(token: string, repo: string, branch: string, files: { path: string; content: string }[], message: string) {
+  const ref = `/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`
+  const head = (await gh<{ object: { sha: string } }>(token, ref.replace("/refs/", "/ref/"))).object.sha
+  const baseTree = (await gh<{ tree: { sha: string } }>(token, `/repos/${repo}/git/commits/${head}`)).tree.sha
+  const tree = await gh<{ sha: string }>(token, `/repos/${repo}/git/trees`, {
+    method: "POST",
+    body: JSON.stringify({ base_tree: baseTree, tree: files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.content })) }),
+  })
+  const commit = await gh<{ sha: string }>(token, `/repos/${repo}/git/commits`, {
+    method: "POST",
+    body: JSON.stringify({ message, tree: tree.sha, parents: [head] }),
+  })
+  await gh(token, ref, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) })
+  return commit.sha
+}
+
+// A branch from `base` with the given files in one commit, and a PR for it. Returns the PR URL.
 export async function openFilesPr(
   token: string,
   repo: string,
   base: string,
-  opts: { branch: string; title: string; body: string; files: { path: string; content: string; message: string }[] }
+  opts: { branch: string; title: string; body: string; files: { path: string; content: string }[] }
 ): Promise<string> {
   const { object } = await gh<{ object: { sha: string } }>(token, `/repos/${repo}/git/ref/heads/${encodeURIComponent(base)}`)
   await gh(token, `/repos/${repo}/git/refs`, { method: "POST", body: JSON.stringify({ ref: `refs/heads/${opts.branch}`, sha: object.sha }) })
-  for (const file of opts.files) {
-    const path = file.path.split("/").map(encodeURIComponent).join("/")
-    const existing = await gh<{ sha: string }>(token, `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(opts.branch)}`).catch((e) => {
-      if (is404(e)) return null
-      throw e
-    })
-    await gh(token, `/repos/${repo}/contents/${path}`, {
-      method: "PUT",
-      body: JSON.stringify({ message: file.message, content: Buffer.from(file.content).toString("base64"), branch: opts.branch, sha: existing?.sha }),
-    })
-  }
+  await commitFiles(token, repo, opts.branch, opts.files, opts.title)
   const pr = await gh<{ html_url: string }>(token, `/repos/${repo}/pulls`, {
     method: "POST",
     body: JSON.stringify({ title: opts.title, head: opts.branch, base, body: opts.body }),

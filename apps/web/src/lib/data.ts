@@ -1,6 +1,7 @@
 import "server-only"
 import { FieldValue } from "firebase-admin/firestore"
 import { db } from "./firebase/admin"
+import type { FixResult } from "./fix"
 import type { User } from "./session"
 
 export type Role = "developer" | "admin"
@@ -41,7 +42,8 @@ export type Release = {
   steps?: StepStatus[]
   provenanceUrl?: string
   error?: string
-  fix?: { cause: string; summary: string; prUrl?: string; files: string[] }
+  fix?: FixResult
+  liveLog?: Record<string, string> // step number → recent output sent by the workflow
 }
 
 const packages = db.collection("packages")

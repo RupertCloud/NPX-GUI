@@ -1,8 +1,9 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { CheckCircle2, ExternalLink, Loader2, XCircle } from "lucide-react"
+import { LogConsole } from "@/components/log-console"
 import { cn } from "@/lib/utils"
 
 export type LogLine = { t: string; kind: "step" | "thinking" | "output" | "error"; text: string }
@@ -94,41 +95,26 @@ const lineStyle: Record<LogLine["kind"], string> = {
 }
 const prefix: Record<LogLine["kind"], string> = { step: "›", thinking: "thinking", output: "ai", error: "error" }
 
-// Collapsible log of what the job did and what the AI wrote. Open while the job runs.
+// Log of what the job did and what the AI wrote. Open while the job runs.
 function JobConsole({ job }: { job: JobView }) {
   const logs = job.logs ?? []
   const active = ACTIVE.includes(job.status)
-  const [open, setOpen] = useState(active)
-  const end = useRef<HTMLDivElement>(null)
-  const size = logs.reduce((n, l) => n + l.text.length, 0)
-
-  // Follow new output while open.
-  useEffect(() => {
-    if (open) end.current?.scrollIntoView({ block: "nearest" })
-  }, [size, open])
-
   if (logs.length === 0 && !active) return null
   return (
-    <details open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)} className="rounded-lg border">
-      <summary className="cursor-pointer px-3 py-1.5 text-sm font-medium select-none">
-        Console <span className="font-normal text-muted-foreground">({logs.length} {logs.length === 1 ? "entry" : "entries"})</span>
-      </summary>
-      <div
-        role="log"
-        aria-live="polite"
-        className="max-h-80 overflow-auto rounded-b-lg bg-[#1f1e1d] p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap"
-      >
-        {logs.length === 0 && <div className="text-[#9c9a92]">Waiting for the job to start…</div>}
-        {logs.map((l, i) => (
-          <div key={i} className={lineStyle[l.kind]}>
-            <span className="mr-2 text-[#6f6d66] select-none">
-              {new Date(l.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} {prefix[l.kind]}
-            </span>
-            {l.text}
-          </div>
-        ))}
-        <div ref={end} />
-      </div>
-    </details>
+    <LogConsole
+      count={`${logs.length} ${logs.length === 1 ? "entry" : "entries"}`}
+      active={active}
+      size={logs.reduce((n, l) => n + l.text.length, 0)}
+    >
+      {logs.length === 0 && <div className="text-[#9c9a92]">Waiting for the job to start…</div>}
+      {logs.map((l, i) => (
+        <div key={i} className={lineStyle[l.kind]}>
+          <span className="mr-2 text-[#6f6d66] select-none">
+            {new Date(l.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} {prefix[l.kind]}
+          </span>
+          {l.text}
+        </div>
+      ))}
+    </LogConsole>
   )
 }
