@@ -32,6 +32,12 @@ import { getNpmInfo } from "@/lib/npm"
 import { compare, gitTagFor, isValidDistTag, isValidVersion } from "@/lib/release"
 import { requireUser, type User } from "@/lib/session"
 import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
+import { FieldValue } from "firebase-admin/firestore"
+import { checkBaseUrl, DEFAULT_MODEL, getAiSettings, testAi, type StoredAiSettings } from "@/lib/ai"
+import { encrypt } from "@/lib/crypto"
+import { db } from "@/lib/firebase/admin"
+import { suggestFix } from "@/lib/fix"
+import { aiLaunchConfig, detectLaunchConfig, openLauncherPr, repoContext, validateLaunchConfig } from "@/lib/launcher"
 
 export type ActionResult = { error?: string; ok?: string } | undefined
 
@@ -91,13 +97,14 @@ export async function openWorkflowPrAction(id: string): Promise<ActionResult> {
   }
 }
 
-// Merges npxhub's own workflow PR from the dashboard.
-export async function mergeWorkflowPr(id: string): Promise<ActionResult> {
+// Merges one of npxhub's own PRs (workflow or launcher) from the dashboard.
+export async function mergePackagePr(id: string, kind: "workflow" | "launcher"): Promise<ActionResult> {
   try {
     const user = await requireUser()
     const pkg = await packageFor(user, id)
-    const number = pkg.workflowPrUrl ? pullNumber(pkg.workflowPrUrl, pkg.repo) : null
-    if (!number) return { error: "No npxhub workflow PR to merge" }
+    const url = kind === "workflow" ? pkg.workflowPrUrl : pkg.launcherPrUrl
+    const number = url ? pullNumber(url, pkg.repo) : null
+    if (!number) return { error: "No npxhub PR to merge" }
     await mergePull(user.githubToken, pkg.repo, number)
     revalidatePath(`/packages/${id}`)
     return { ok: "Merged" }
@@ -105,6 +112,112 @@ export async function mergeWorkflowPr(id: string): Promise<ActionResult> {
     if (e instanceof GitHubError && (e.status === 405 || e.status === 409)) {
       return { error: `GitHub couldn't merge it: ${e.message}. Check the PR's required reviews or checks on GitHub.` }
     }
+    return { error: message(e) }
+  }
+}
+
+// Opens a PR that makes the package runnable with npx. Uses the user's AI provider when set, rules otherwise.
+export async function makeRunnable(id: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const pkg = await packageFor(user, id)
+    const { raw, paths, readme } = await repoContext(user.githubToken, pkg)
+    if (!raw) return { error: "No package.json found on the default branch" }
+    const manifest = JSON.parse(raw)
+    if (manifest.bin) return { error: "This package already has a bin, so npx can run it" }
+    const ai = await getAiSettings(user.uid)
+    const config = ai ? await aiLaunchConfig(ai, manifest, paths, readme) : detectLaunchConfig(manifest)
+    const invalid = validateLaunchConfig(config, manifest)
+    if (invalid) return { error: `${ai ? "The AI's" : "The"} launcher config was rejected: ${invalid}` }
+    const url = await openLauncherPr(user.githubToken, pkg, raw, config, ai ? "ai" : "rules")
+    await updatePackage(id, { launcherPrUrl: url })
+    revalidatePath(`/packages/${id}`)
+    return { ok: `Launcher PR opened${ai ? " (configured with AI)" : ""}` }
+  } catch (e) {
+    return { error: message(e) }
+  }
+}
+
+export async function saveAiSettings(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const provider = formData.get("provider") === "openai" ? "openai" : "anthropic"
+    const baseUrl = String(formData.get("baseUrl") ?? "").trim()
+    const model = String(formData.get("model") ?? "").trim() || DEFAULT_MODEL[provider]
+    const apiKey = String(formData.get("apiKey") ?? "").trim()
+    const badUrl = checkBaseUrl(baseUrl)
+    if (badUrl) return { error: badUrl }
+    if (!model) return { error: "Enter a model name" }
+    if (!/^[\w.:/@-]{1,200}$/.test(model)) return { error: "That model name has unexpected characters" }
+
+    const ref = db.collection("users").doc(user.uid)
+    const existing = (await ref.get()).data()?.ai as StoredAiSettings | undefined
+    if (!apiKey && !existing?.keyEnc) return { error: "Enter an API key" }
+    const settings: StoredAiSettings = {
+      provider,
+      baseUrl,
+      model,
+      keyEnc: apiKey ? encrypt(apiKey) : existing!.keyEnc,
+      keyHint: apiKey ? apiKey.slice(-4) : existing!.keyHint,
+    }
+    await ref.set({ ai: settings }, { merge: true })
+    revalidatePath("/settings")
+    return { ok: "Saved" }
+  } catch (e) {
+    return { error: message(e) }
+  }
+}
+
+export async function removeAiSettings(): Promise<ActionResult> {
+  const user = await requireUser()
+  await db.collection("users").doc(user.uid).update({ ai: FieldValue.delete() })
+  revalidatePath("/settings")
+  return { ok: "Removed" }
+}
+
+export async function testAiSettings(): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const ai = await getAiSettings(user.uid)
+    if (!ai) return { error: "Save a provider first" }
+    await testAi(ai)
+    return { ok: `${ai.model} answered` }
+  } catch (e) {
+    return { error: message(e) }
+  }
+}
+
+// Asks the user's AI provider to diagnose a failed release and, when it can, opens a fix PR.
+export async function suggestReleaseFix(id: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const release = await getRelease(id)
+    const pkg = release && (await getPackage(user, release.packageId))
+    if (!release || !pkg) return { error: "Release not found" }
+    if (release.status !== "failed") return { error: "Only failed releases can be diagnosed" }
+    const ai = await getAiSettings(user.uid)
+    if (!ai) return { error: "Add an AI provider in Settings first" }
+    const fix = await suggestFix(user.githubToken, ai, pkg, release)
+    await updateRelease(id, { fix })
+    revalidatePath(`/releases/${id}`)
+    return { ok: fix.prUrl ? "Fix PR opened" : "Diagnosis ready; no file changes proposed" }
+  } catch (e) {
+    return { error: message(e) }
+  }
+}
+
+// Merges the AI fix PR for a release.
+export async function mergeFixPr(id: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser()
+    const release = await getRelease(id)
+    const pkg = release && (await getPackage(user, release.packageId))
+    const number = release?.fix?.prUrl && pkg ? pullNumber(release.fix.prUrl, pkg.repo) : null
+    if (!release || !pkg || !number) return { error: "No fix PR to merge" }
+    await mergePull(user.githubToken, pkg.repo, number)
+    revalidatePath(`/releases/${id}`)
+    return { ok: "Merged. Retry the release when ready." }
+  } catch (e) {
     return { error: message(e) }
   }
 }

@@ -128,6 +128,42 @@ export function pullNumber(url: string, repo: string): number | null {
   return m ? Number(m[1]) : null
 }
 
+// A branch from `base` with the given files committed, and a PR for it. Returns the PR URL.
+export async function openFilesPr(
+  token: string,
+  repo: string,
+  base: string,
+  opts: { branch: string; title: string; body: string; files: { path: string; content: string; message: string }[] }
+): Promise<string> {
+  const { object } = await gh<{ object: { sha: string } }>(token, `/repos/${repo}/git/ref/heads/${encodeURIComponent(base)}`)
+  await gh(token, `/repos/${repo}/git/refs`, { method: "POST", body: JSON.stringify({ ref: `refs/heads/${opts.branch}`, sha: object.sha }) })
+  for (const file of opts.files) {
+    const path = file.path.split("/").map(encodeURIComponent).join("/")
+    const existing = await gh<{ sha: string }>(token, `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(opts.branch)}`).catch((e) => {
+      if (is404(e)) return null
+      throw e
+    })
+    await gh(token, `/repos/${repo}/contents/${path}`, {
+      method: "PUT",
+      body: JSON.stringify({ message: file.message, content: Buffer.from(file.content).toString("base64"), branch: opts.branch, sha: existing?.sha }),
+    })
+  }
+  const pr = await gh<{ html_url: string }>(token, `/repos/${repo}/pulls`, {
+    method: "POST",
+    body: JSON.stringify({ title: opts.title, head: opts.branch, base, body: opts.body }),
+  })
+  return pr.html_url
+}
+
+// File paths in the repo at `ref` (capped; enough to describe the project to a model).
+export async function listFiles(token: string, repo: string, ref: string, limit = 400): Promise<string[]> {
+  const tree = await gh<{ tree: { path: string; type: string }[] }>(token, `/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`)
+  return tree.tree
+    .filter((t) => t.type === "blob" && !/(^|\/)(node_modules|\.git)\//.test(t.path))
+    .map((t) => t.path)
+    .slice(0, limit)
+}
+
 // Stores the npm token as an encrypted Actions secret. npxhub itself never keeps it.
 export async function setRepoSecret(token: string, repo: string, name: string, value: string) {
   const key = await gh<{ key_id: string; key: string }>(token, `/repos/${repo}/actions/secrets/public-key`)

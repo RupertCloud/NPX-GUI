@@ -14,11 +14,12 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { getPackage, listReleases, roleOf } from "@/lib/data"
 import { compactNumber, timeAgo } from "@/lib/format"
-import { getFile, getPull, hasRepoSecret, pullNumber } from "@/lib/github"
+import { getFile, getPackageJson, getPull, hasRepoSecret, pullNumber } from "@/lib/github"
+import { db } from "@/lib/firebase/admin"
 import { getNpmInfo } from "@/lib/npm"
 import { requireUser } from "@/lib/session"
 import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
-import { addMember, mergeWorkflowPr, openWorkflowPrAction, removeMember, removePackage, setNpmToken } from "../../actions"
+import { addMember, makeRunnable, mergePackagePr, openWorkflowPrAction, removeMember, removePackage, setNpmToken } from "../../actions"
 
 const selectClass =
   "h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
@@ -29,15 +30,20 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
   if (!pkg) notFound()
 
   const isAdmin = roleOf(pkg, user) === "admin"
-  const [npm, workflow, secret, history] = await Promise.all([
+  const [npm, workflow, secret, history, manifest] = await Promise.all([
     getNpmInfo(pkg.npmName).catch(() => null),
     getFile(user.githubToken, pkg.repo, WORKFLOW_PATH, pkg.defaultBranch).catch(() => null),
     hasRepoSecret(user.githubToken, pkg.repo, "NPM_TOKEN").catch(() => null),
     listReleases([pkg.id]),
+    getPackageJson(user.githubToken, pkg.repo, pkg.directory, pkg.defaultBranch).catch(() => null),
   ])
   const workflowCurrent = isCurrentWorkflow(workflow)
   const prNumber = pkg.workflowPrUrl ? pullNumber(pkg.workflowPrUrl, pkg.repo) : null
   const pr = !workflowCurrent && prNumber ? await getPull(user.githubToken, pkg.repo, prNumber).catch(() => null) : null
+  const hasBin = !!manifest?.bin
+  const launcherNumber = !hasBin && pkg.launcherPrUrl ? pullNumber(pkg.launcherPrUrl, pkg.repo) : null
+  const launcherPr = launcherNumber ? await getPull(user.githubToken, pkg.repo, launcherNumber).catch(() => null) : null
+  const hasAi = !!(await db.collection("users").doc(user.uid).get()).data()?.ai?.keyEnc
   const deprecate = `npm deprecate ${pkg.npmName}@"<version>" "<message>"`
 
   return (
@@ -127,7 +133,7 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {pr?.state === "open" && (
-                    <ActionForm action={mergeWorkflowPr.bind(null, pkg.id)}>
+                    <ActionForm action={mergePackagePr.bind(null, pkg.id, "workflow")}>
                       <SubmitButton size="sm">Merge PR #{pr.number}</SubmitButton>
                     </ActionForm>
                   )}
@@ -168,6 +174,52 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
               <p className="mt-2 text-muted-foreground">Ask a package admin to set it.</p>
             )}
           </SetupRow>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle>Run with npx</CardTitle>
+          <CardDescription>
+            {hasBin
+              ? "This package has a bin, so people can run it directly."
+              : "This package has no bin yet. npxhub can add a launcher so npx installs the app and starts it locally."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {hasBin ? (
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-muted px-3 py-2 font-mono">
+              <code>npx {pkg.npmName}</code>
+              <CopyButton value={`npx ${pkg.npmName}`} label="Copy command" />
+            </div>
+          ) : launcherPr?.state === "open" ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p>
+                <a href={launcherPr.html_url} className="underline" target="_blank" rel="noreferrer">
+                  Launcher PR #{launcherPr.number}
+                </a>{" "}
+                is open. Review it, merge, then publish a new version.
+              </p>
+              <ActionForm action={mergePackagePr.bind(null, pkg.id, "launcher")}>
+                <SubmitButton size="sm">Merge PR #{launcherPr.number}</SubmitButton>
+              </ActionForm>
+            </div>
+          ) : (
+            <>
+              <p className="text-muted-foreground">
+                Opens a PR adding <code className="font-mono">bin/{pkg.npmName.replace(/^@[^/]+\//, "")}.cjs</code> and the{" "}
+                <code className="font-mono">bin</code>/<code className="font-mono">files</code> fields.{" "}
+                {hasAi
+                  ? "Your AI provider reads the repo to pick the start command, port, build output and env vars."
+                  : "Settings are chosen from package.json by rules. Add an AI provider in Settings for a repo-aware setup."}
+              </p>
+              <ActionForm action={makeRunnable.bind(null, pkg.id)}>
+                <SubmitButton variant="outline" size="sm">
+                  Make runnable with npx
+                </SubmitButton>
+              </ActionForm>
+            </>
+          )}
         </CardContent>
       </Card>
 

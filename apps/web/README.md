@@ -16,6 +16,14 @@ Firestore, and GitHub Actions for the actual publish.
   publishes (with provenance for public repos) and verifies the install with `npx`. The release page follows the run live.
 - **Teams:** admins add collaborators by GitHub username as `developer` or `admin`. Access checks run on the server;
   GitHub's own repo permissions still apply to each user.
+- **Run with npx:** for a package with no `bin`, npxhub opens a PR adding a fixed launcher script
+  (`bin/<name>.cjs`) plus `bin`/`files` in package.json, so `npx <package>` starts the app locally. The launcher either
+  runs an npm script (server apps) or serves a built static folder, supports `--port`, `--no-open`, `--version` and
+  `--help`, and checks required env vars.
+- **AI (optional, bring your own key):** in Settings, add an Anthropic-compatible or OpenAI-compatible provider. The key
+  is encrypted like the GitHub token. npxhub then uses it to configure launchers from the repo (start command, port,
+  build output, env vars; the model never writes the launcher code) and to diagnose failed releases, proposing fixes as
+  PRs limited to files the job log mentions.
 - **Registry data** (versions, dist-tags, downloads, provenance) comes from the public npm APIs.
 
 ## One-time Firebase setup
