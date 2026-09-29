@@ -3,6 +3,7 @@ import { z } from "zod"
 import { generateJson, type AiSettings } from "./ai"
 import { getFile, getJobLog, getRunJob, joinPath, listFiles, openFilesPr } from "./github"
 import type { Package, Release } from "./data"
+import type { JobLogger } from "./jobs"
 
 // "Suggest a fix with AI" on a failed release: the model sees the job log and the repo files the log mentions,
 // and may only edit those files. Edits go to a PR the maintainer reviews and merges.
@@ -28,8 +29,9 @@ const cleanLog = (log: string) =>
     .slice(-250)
     .join("\n")
 
-export async function suggestFix(token: string, ai: AiSettings, pkg: Package, release: Release): Promise<FixResult> {
+export async function suggestFix(token: string, ai: AiSettings, pkg: Package, release: Release, logger?: JobLogger): Promise<FixResult> {
   if (!release.runId) throw new Error("This release has no GitHub Actions run to read")
+  logger?.step(`Reading the log of GitHub Actions run ${release.runId}`)
   const job = await getRunJob(token, release.repo, release.runId)
   const log = job ? await getJobLog(token, release.repo, job.id) : null
   if (!log) throw new Error("The job log isn't available yet")
@@ -46,6 +48,8 @@ export async function suggestFix(token: string, ai: AiSettings, pkg: Package, re
     if (content !== null && content.length <= MAX_FILE_BYTES) files.push({ path, content })
   }
 
+  logger?.step(`Giving the model the log and ${files.map((f) => f.path).join(", ")}`)
+  logger?.step(`Asking ${ai.model} what went wrong`)
   const system =
     "You diagnose failed npm release jobs on GitHub Actions and propose minimal fixes. " +
     "The job runs: checkout, npm version, npm ci / install, npm run build, npm test, npm pack, git tag and push, npm publish, npx verify. " +
@@ -58,10 +62,12 @@ export async function suggestFix(token: string, ai: AiSettings, pkg: Package, re
     ...files.map((f) => `File ${f.path}:\n${f.content}`),
   ].join("\n\n")
 
-  const fix = await generateJson(ai, system, prompt, FixSchema)
+  const fix = await generateJson(ai, system, prompt, FixSchema, logger?.ai)
+  logger?.step(`Cause: ${fix.cause}`)
   const allowed = new Set(files.map((f) => f.path))
   const edits = fix.edits.filter((e) => allowed.has(e.path) && e.content !== files.find((f) => f.path === e.path)?.content)
   if (edits.length === 0) return { cause: fix.cause, summary: fix.summary, files: [] }
+  logger?.step(`Proposed changes:\n${edits.map((e) => `  ${e.path}: ${e.reason}`).join("\n")}\nOpening the fix PR`)
 
   const prUrl = await openFilesPr(token, release.repo, release.branch, {
     branch: `npxhub/fix-${Date.now()}`,

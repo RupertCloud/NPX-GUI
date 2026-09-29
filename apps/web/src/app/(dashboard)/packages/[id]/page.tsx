@@ -16,6 +16,8 @@ import { getPackage, listReleases, roleOf } from "@/lib/data"
 import { compactNumber, timeAgo } from "@/lib/format"
 import { getFile, getPackageJson, getPull, hasRepoSecret, pullNumber } from "@/lib/github"
 import { db } from "@/lib/firebase/admin"
+import { latestJob, toJobView } from "@/lib/jobs"
+import { JobStatus } from "@/components/job-status"
 import { getNpmInfo } from "@/lib/npm"
 import { requireUser } from "@/lib/session"
 import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
@@ -44,6 +46,9 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
   const launcherNumber = !hasBin && pkg.launcherPrUrl ? pullNumber(pkg.launcherPrUrl, pkg.repo) : null
   const launcherPr = launcherNumber ? await getPull(user.githubToken, pkg.repo, launcherNumber).catch(() => null) : null
   const hasAi = !!(await db.collection("users").doc(user.uid).get()).data()?.ai?.keyEnc
+  const launcherJob = !hasBin ? await latestJob("launcher", pkg.id) : null
+  const launcherJobView = launcherJob ? toJobView(launcherJob) : null
+  const launcherBusy = launcherJobView?.status === "queued" || launcherJobView?.status === "running"
   const deprecate = `npm deprecate ${pkg.npmName}@"<version>" "<message>"`
 
   return (
@@ -213,11 +218,14 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
                   ? "Your AI provider reads the repo to pick the start command, port, build output and env vars."
                   : "Settings are chosen from package.json by rules. Add an AI provider in Settings for a repo-aware setup."}
               </p>
-              <ActionForm action={makeRunnable.bind(null, pkg.id)}>
-                <SubmitButton variant="outline" size="sm">
-                  Make runnable with npx
-                </SubmitButton>
-              </ActionForm>
+              {launcherJobView && <JobStatus initial={launcherJobView} label="Making it runnable" />}
+              {!launcherBusy && (
+                <ActionForm action={makeRunnable.bind(null, pkg.id)}>
+                  <SubmitButton variant="outline" size="sm">
+                    {launcherJobView?.status === "failed" ? "Try again" : "Make runnable with npx"}
+                  </SubmitButton>
+                </ActionForm>
+              )}
             </>
           )}
         </CardContent>

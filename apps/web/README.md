@@ -24,6 +24,15 @@ Firestore, and GitHub Actions for the actual publish.
   is encrypted like the GitHub token. npxhub then uses it to configure launchers from the repo (start command, port,
   build output, env vars; the model never writes the launcher code) and to diagnose failed releases, proposing fixes as
   PRs limited to files the job log mentions.
+- **Next step per package:** the Packages list shows one button per package for the most useful fix: merge or
+  update the workflow, add the npm token, fix a failed release with AI, or make the package runnable with npx.
+- **Background jobs:** AI and launcher work runs as a job stored in Firestore (`jobs` collection). The server starts it
+  with a separate request to its own `/api/jobs/<id>/run` endpoint (authenticated with a per-job HMAC), so it keeps
+  running when the page is refreshed or closed; pages poll the job and show the result. A job that stops reporting
+  for 15 minutes is shown as failed and can be started again. Each job keeps a log (steps, the AI's streamed output,
+  and Claude's summarized reasoning on Anthropic's API), shown in a collapsible **Console** under the job.
+- **Streaming AI calls:** both provider types stream their responses, so proxies such as Cloudflare don't cut long
+  requests off with HTTP 524; OpenAI-compatible calls retry once on 502/503/524.
 - **Registry data** (versions, dist-tags, downloads, provenance) comes from the public npm APIs.
 
 ## One-time Firebase setup

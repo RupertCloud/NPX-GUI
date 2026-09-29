@@ -8,15 +8,26 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { listPackages, listReleases } from "@/lib/data"
 import { compactNumber, timeAgo } from "@/lib/format"
 import { getNpmInfo, type NpmInfo } from "@/lib/npm"
+import { NextStepCell } from "@/components/next-step"
+import { db } from "@/lib/firebase/admin"
+import { nextStep } from "@/lib/health"
+import { latestJobs } from "@/lib/jobs"
 import { requireUser } from "@/lib/session"
 
 export default async function PackagesPage() {
   const user = await requireUser()
   const packages = await listPackages(user)
-  const [npm, releases] = await Promise.all([
+  const ids = packages.map((p) => p.id)
+  const [npm, releases, jobs, userDoc] = await Promise.all([
     Promise.all(packages.map((p) => getNpmInfo(p.npmName).catch((): NpmInfo | null => null))),
-    listReleases(packages.map((p) => p.id)),
+    listReleases(ids),
+    latestJobs(ids),
+    db.collection("users").doc(user.uid).get(),
   ])
+  const hasAi = !!userDoc.data()?.ai?.keyEnc
+  const steps = await Promise.all(
+    packages.map((p) => nextStep(user.githubToken, p, releases.find((r) => r.packageId === p.id), jobs))
+  )
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString()
   const published = npm.filter((n) => n?.exists)
   const stats = [
@@ -66,9 +77,7 @@ export default async function PackagesPage() {
                 <TableHead>Last published</TableHead>
                 <TableHead>Provenance</TableHead>
                 <TableHead>Last release</TableHead>
-                <TableHead className="pr-4 text-right">
-                  <span className="sr-only">Actions</span>
-                </TableHead>
+                <TableHead className="pr-4 text-right">Next step</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -106,9 +115,7 @@ export default async function PackagesPage() {
                     </TableCell>
                     <TableCell>{last ? <StatusBadge status={last.status} /> : "—"}</TableCell>
                     <TableCell className="pr-4 text-right">
-                      <Link href={`/publish?package=${p.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
-                        Release
-                      </Link>
+                      <NextStepCell step={steps[i]} packageId={p.id} hasAi={hasAi} />
                     </TableCell>
                   </TableRow>
                 )

@@ -12,10 +12,12 @@ import { RELEASE_STEPS } from "@/lib/workflow"
 import { mergeFixPr, retryRelease, suggestReleaseFix } from "@/app/(dashboard)/actions"
 import { ActionForm } from "@/components/action-form"
 import { SubmitButton } from "@/components/submit-button"
+import { JobStatus, type JobView } from "@/components/job-status"
 
 const TERMINAL = ["succeeded", "failed", "cancelled"]
 
-export function ReleaseView({ initial, log }: { initial: Release; log: string | null }) {
+export function ReleaseView({ initial, log, fixJob }: { initial: Release; log: string | null; fixJob: JobView | null }) {
+  const fixBusy = fixJob?.status === "queued" || fixJob?.status === "running"
   const router = useRouter()
   const [release, setRelease] = useState(initial)
   const [syncError, setSyncError] = useState<string>()
@@ -120,11 +122,14 @@ export function ReleaseView({ initial, log }: { initial: Release; log: string | 
                 review. Set a provider in Settings first.
               </p>
             )}
-            <ActionForm action={suggestReleaseFix.bind(null, release.id)}>
-              <SubmitButton variant="outline" size="sm">
-                {initial.fix ? "Ask again" : "Suggest a fix with AI"}
-              </SubmitButton>
-            </ActionForm>
+            {fixJob && <JobStatus initial={fixJob} label="Diagnosing with AI" />}
+            {!fixBusy && (
+              <ActionForm action={suggestReleaseFix.bind(null, release.id)}>
+                <SubmitButton variant="outline" size="sm">
+                  {initial.fix ? "Ask again" : "Suggest a fix with AI"}
+                </SubmitButton>
+              </ActionForm>
+            )}
           </CardContent>
         </Card>
       )}

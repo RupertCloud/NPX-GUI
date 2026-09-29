@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { generateJson, type AiSettings } from "./ai"
+import { generateJson, type AiLog, type AiSettings } from "./ai"
 import { getFile, joinPath, listFiles, openFilesPr } from "./github"
 import type { Package } from "./data"
 
@@ -63,7 +63,7 @@ export function validateLaunchConfig(c: LaunchConfig, m: Manifest): string | nul
   return null
 }
 
-export async function aiLaunchConfig(ai: AiSettings, m: Manifest, paths: string[], readme: string | null): Promise<LaunchConfig> {
+export async function aiLaunchConfig(ai: AiSettings, m: Manifest, paths: string[], readme: string | null, log?: AiLog): Promise<LaunchConfig> {
   const system =
     "You configure a generic launcher that lets people run a Node.js app with `npx <package>`. " +
     "The launcher either runs one npm script that starts a server (mode script) or serves a built static folder (mode static). " +
@@ -77,7 +77,7 @@ export async function aiLaunchConfig(ai: AiSettings, m: Manifest, paths: string[
   ]
     .filter(Boolean)
     .join("\n\n")
-  return generateJson(ai, system, prompt, LaunchConfigSchema)
+  return generateJson(ai, system, prompt, LaunchConfigSchema, log)
 }
 
 export const commandName = (npmName: string) => npmName.replace(/^@[^/]+\//, "")
