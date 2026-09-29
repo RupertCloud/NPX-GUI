@@ -1,6 +1,6 @@
 import { CheckCircle2, Circle, CircleSlash, Loader2, XCircle, Clock } from "lucide-react"
 import { cn } from "@/lib/utils"
-import type { ReleaseStatus, StepStatus } from "@/lib/mock-data"
+import type { ReleaseStatus, StepStatus } from "@/lib/data"
 
 const styles: Record<ReleaseStatus | StepStatus, { icon: typeof Circle; className: string; label: string }> = {
   queued: { icon: Clock, className: "text-muted-foreground", label: "Queued" },

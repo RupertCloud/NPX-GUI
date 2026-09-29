@@ -1,5 +1,3 @@
-import type { Package } from "./mock-data"
-
 export type Bump = "patch" | "minor" | "major" | "prerelease"
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
@@ -47,33 +45,22 @@ export function compare(a: string, b: string): number {
   return pa[4].localeCompare(pb[4], undefined, { numeric: true })
 }
 
-export type Check = { label: string; level: "blocker" | "warning"; passed: boolean; detail?: string }
+// Git tag for a release: v1.2.3, or name@1.2.3 for a package in a subdirectory (monorepos).
+export function gitTagFor(npmName: string, directory: string, version: string) {
+  return directory && directory !== "." ? `${npmName}@${version}` : `v${version}`
+}
 
-// Pre-flight results as the API would return them (SRS §5), derived from mock package state.
-export function preflight(pkg: Package): Check[] {
-  return [
-    {
-      label: "bin field points at an existing file",
-      level: pkg.bin ? "blocker" : "warning",
-      passed: !!pkg.bin,
-      detail: pkg.bin ? Object.values(pkg.bin).join(", ") : "No bin field; npx will not run this package",
-    },
-    { label: "Name owned on npmjs.com", level: "blocker", passed: true },
-    {
-      label: "Required CI checks green",
-      level: "blocker",
-      passed: pkg.name !== "ridelink-cli",
-      detail: pkg.settings.requiredChecks.length ? pkg.settings.requiredChecks.join(", ") : "No required checks configured",
-    },
-    {
-      label: "Trusted publisher configured",
-      level: "blocker",
-      passed: pkg.trustedPublisherVerified,
-      detail: pkg.trustedPublisherVerified ? "Dry-run publish succeeded" : "Finish setup on the package page",
-    },
-    { label: "Dry-run pack: no secrets or key files", level: "blocker", passed: true, detail: "38 files, 212 kB unpacked" },
-    { label: "repository.url matches GitHub repo", level: "warning", passed: true },
-    { label: "engines.node set", level: "warning", passed: pkg.name !== "@rupert/coolify-deploy" },
-    { label: "README mentions the npx command", level: "warning", passed: !!pkg.bin },
-  ]
+// Release notes from commit subjects, grouped by conventional-commit type (REL-3).
+export function draftNotes(subjects: string[]) {
+  const groups: Record<string, string[]> = { Features: [], Fixes: [], Other: [] }
+  for (const s of subjects) {
+    if (/^chore\(release\)/.test(s) || /^Merge (pull request|branch)/.test(s)) continue
+    const m = /^(\w+)(\([^)]*\))?!?:\s*(.+)$/.exec(s)
+    const group = m?.[1] === "feat" ? "Features" : m?.[1] === "fix" ? "Fixes" : "Other"
+    groups[group].push(`- ${m ? m[3] : s}`)
+  }
+  const out = Object.entries(groups)
+    .filter(([, lines]) => lines.length)
+    .map(([title, lines]) => `### ${title}\n${lines.join("\n")}`)
+  return out.join("\n\n") || "- No changes listed"
 }

@@ -1,104 +1,135 @@
-"use client"
-
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { toast } from "sonner"
+import Link from "next/link"
+import { Lock } from "lucide-react"
 import { PageHeader } from "@/components/page-header"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@/components/submit-button"
+import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { installations } from "@/lib/mock-data"
+import { findPackageByName } from "@/lib/data"
+import { timeAgo } from "@/lib/format"
+import { getPackageJson, getRepo, listRepos } from "@/lib/github"
+import { getNpmInfo } from "@/lib/npm"
+import { requireUser } from "@/lib/session"
+import { cn } from "@/lib/utils"
+import { addPackage } from "../../actions"
 
-const repos = [
-  { fullName: "rupertcloud/tools", pkg: { name: "@rupert/env-check", version: "0.1.0", bin: { "env-check": "./index.js" }, files: ["index.js", "lib"] } },
-  { fullName: "silkcode/silk-icons", pkg: { name: "@silk/icons", version: "1.0.3", bin: null, files: ["dist"] } },
-  { fullName: "ridelink/ridelink-sdk", pkg: { name: "ridelink-sdk", version: "0.3.0", bin: null, files: ["dist"] } },
-]
-
-export default function NewPackagePage() {
-  const router = useRouter()
-  const [repo, setRepo] = useState<string>()
-  const [directory, setDirectory] = useState("")
-  const found = repos.find((r) => r.fullName === repo)
+export default async function NewPackagePage({ searchParams }: { searchParams: Promise<{ repo?: string; dir?: string }> }) {
+  const user = await requireUser()
+  const { repo: selected, dir = "" } = await searchParams
+  const repos = (await listRepos(user.githubToken)).filter((r) => r.permissions?.push)
 
   return (
     <>
       <PageHeader
         title="Add a package"
-        description="Pick a repo the npxhub GitHub App is installed on. npxhub reads package.json and shows what it found before saving."
+        description="Pick one of your GitHub repos. npxhub reads its package.json and shows what it found before saving."
       />
-      <Card>
-        <CardHeader>
-          <CardTitle>Repository</CardTitle>
-          <CardDescription>
-            Installed on {installations.map((i) => i.accountLogin).join(", ")}.{" "}
-            <a href="https://github.com/apps/npxhub/installations/new" className="underline">
-              Install on another account
-            </a>
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <fieldset className="grid gap-2">
-            <legend className="sr-only">Repository</legend>
-            {repos.map((r) => (
-              <label
-                key={r.fullName}
-                className="flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 has-checked:border-primary has-checked:bg-primary/5"
-              >
-                <input
-                  type="radio"
-                  name="repo"
-                  value={r.fullName}
-                  checked={repo === r.fullName}
-                  onChange={() => setRepo(r.fullName)}
-                  className="accent-primary"
-                />
-                <span className="font-mono text-sm">{r.fullName}</span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="grid gap-1.5">
-            <Label htmlFor="dir">Subdirectory (monorepos)</Label>
-            <Input id="dir" placeholder="packages/cli" value={directory} onChange={(e) => setDirectory(e.target.value)} />
-          </div>
-        </CardContent>
-      </Card>
-
-      {found && (
-        <Card className="mt-6">
+      <div className="grid gap-6 lg:grid-cols-[1fr_24rem]">
+        <Card>
           <CardHeader>
-            <CardTitle>Found in package.json</CardTitle>
+            <CardTitle>Repository</CardTitle>
+            <CardDescription>Repos you can push to, most recently updated first.</CardDescription>
           </CardHeader>
           <CardContent>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2">
-              <dt className="text-muted-foreground">name</dt>
-              <dd className="font-mono">{found.pkg.name}</dd>
-              <dt className="text-muted-foreground">version</dt>
-              <dd className="font-mono">{found.pkg.version}</dd>
-              <dt className="text-muted-foreground">bin</dt>
-              <dd className="font-mono">
-                {found.pkg.bin ? JSON.stringify(found.pkg.bin) : <span className="text-warning">none — npx won&apos;t run it</span>}
-              </dd>
-              <dt className="text-muted-foreground">files</dt>
-              <dd className="font-mono">{JSON.stringify(found.pkg.files)}</dd>
-            </dl>
-            <p className="mt-4 text-muted-foreground">
-              Saving opens a PR adding <span className="font-mono">.github/workflows/npxhub-publish.yml</span>. Publishing
-              runs on your GitHub Actions minutes.
-            </p>
-            <Button
-              className="mt-4"
-              onClick={() => {
-                toast.success(`${found.pkg.name} added`, { description: "Workflow PR opened. Finish trusted publishing setup next." })
-                router.push("/packages")
-              }}
-            >
-              Save package
-            </Button>
+            {repos.length === 0 ? (
+              <p className="text-muted-foreground">No repos with write access were found for @{user.login}.</p>
+            ) : (
+              <ul className="max-h-[32rem] divide-y overflow-y-auto rounded-lg border">
+                {repos.map((r) => (
+                  <li key={r.full_name}>
+                    <Link
+                      href={`/packages/new?repo=${encodeURIComponent(r.full_name)}`}
+                      aria-current={selected === r.full_name ? "true" : undefined}
+                      className={cn(
+                        "flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-muted/50",
+                        selected === r.full_name && "bg-primary/10"
+                      )}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5 font-mono text-sm">
+                        <span className="truncate">{r.full_name}</span>
+                        {r.private && <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-label="Private" />}
+                      </span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(r.pushed_at)}</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
-      )}
+
+        <div>{selected ? <Preview token={user.githubToken} repoName={selected} dir={dir} /> : null}</div>
+      </div>
     </>
+  )
+}
+
+async function Preview({ token, repoName, dir }: { token: string; repoName: string; dir: string }) {
+  const repo = await getRepo(token, repoName)
+  const directory = dir.trim().replace(/^\.?\/+|\/+$/g, "") || "."
+  const manifest = await getPackageJson(token, repo.full_name, directory, repo.default_branch)
+  const name = typeof manifest?.name === "string" ? manifest.name : null
+  const [npm, existing] = name ? await Promise.all([getNpmInfo(name), findPackageByName(name)]) : [null, null]
+  const problem = !manifest
+    ? `No package.json in ${directory === "." ? "the repo root" : directory} on ${repo.default_branch}.`
+    : !name
+      ? "package.json has no name."
+      : manifest.private === true
+        ? `package.json is marked "private": true.`
+        : existing
+          ? `${name} is already in npxhub. Ask its admin to add you as a collaborator.`
+          : null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="font-mono text-base">{repo.full_name}</CardTitle>
+        <CardDescription>Default branch {repo.default_branch}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <form className="grid gap-1.5" action="/packages/new">
+          <input type="hidden" name="repo" value={repo.full_name} />
+          <Label htmlFor="dir">Package directory (monorepos)</Label>
+          <div className="flex gap-2">
+            <Input id="dir" name="dir" defaultValue={directory === "." ? "" : directory} placeholder="packages/cli" className="font-mono" />
+            <button type="submit" className={buttonVariants({ variant: "outline" })}>
+              Look
+            </button>
+          </div>
+        </form>
+
+        {manifest && (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+            <dt className="text-muted-foreground">name</dt>
+            <dd className="font-mono break-all">{String(manifest.name ?? "—")}</dd>
+            <dt className="text-muted-foreground">version</dt>
+            <dd className="font-mono">{String(manifest.version ?? "—")}</dd>
+            <dt className="text-muted-foreground">bin</dt>
+            <dd className="font-mono break-all">
+              {manifest.bin ? JSON.stringify(manifest.bin) : <span className="text-warning">none, npx won&apos;t run it</span>}
+            </dd>
+            <dt className="text-muted-foreground">files</dt>
+            <dd className="font-mono break-all">{manifest.files ? JSON.stringify(manifest.files) : "—"}</dd>
+            <dt className="text-muted-foreground">on npm</dt>
+            <dd>{npm?.exists ? `yes, latest ${npm.latest}` : "not yet published"}</dd>
+          </dl>
+        )}
+
+        {problem ? (
+          <p className="text-sm text-destructive">{problem}</p>
+        ) : (
+          <form action={addPackage}>
+            <input type="hidden" name="repo" value={repo.full_name} />
+            <input type="hidden" name="directory" value={directory} />
+            <p className="text-sm text-muted-foreground">
+              Saving opens a PR adding <code className="font-mono">.github/workflows/npxhub-publish.yml</code>.
+              Releases run on your repo&apos;s GitHub Actions minutes.
+            </p>
+            <SubmitButton className="mt-4 w-full">Add {name}</SubmitButton>
+          </form>
+        )}
+      </CardContent>
+    </Card>
   )
 }
