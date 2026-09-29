@@ -6,6 +6,8 @@ import { createHmac, timingSafeEqual } from "node:crypto"
 export type JobKind = "launcher" | "fix"
 export type JobStatus = "queued" | "running" | "succeeded" | "failed"
 
+export type LogLine = { t: string; kind: "step" | "thinking" | "output" | "error"; text: string }
+
 export type Job = {
   id: string
   kind: JobKind
@@ -17,6 +19,7 @@ export type Job = {
   message?: string
   error?: string
   url?: string
+  logs?: LogLine[]
   createdAt: string
   startedAt?: string
   finishedAt?: string
@@ -49,5 +52,19 @@ export function toJobView(job: Job) {
     message: job.message,
     error: status === "failed" && !job.error ? "The job stopped responding; start it again" : job.error,
     url: job.url ?? null,
+    logs: job.logs ?? [],
   }
+}
+
+const MAX_LOG_CHARS = 120_000
+
+// Appends to a job's log, merging streamed chunks of the same kind into one line and keeping the total bounded.
+export function appendLog(lines: LogLine[], kind: LogLine["kind"], text: string, now = new Date()): LogLine[] {
+  const last = lines[lines.length - 1]
+  if (last && last.kind === kind && (kind === "thinking" || kind === "output")) last.text += text
+  else lines.push({ t: now.toISOString(), kind, text })
+  let total = lines.reduce((n, l) => n + l.text.length, 0)
+  while (total > MAX_LOG_CHARS && lines.length > 1) total -= lines.shift()!.text.length
+  if (total > MAX_LOG_CHARS) lines[0].text = lines[0].text.slice(-MAX_LOG_CHARS)
+  return lines
 }

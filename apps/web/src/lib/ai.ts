@@ -39,22 +39,43 @@ export async function getAiSettings(uid: string): Promise<AiSettings | null> {
   return { provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model, apiKey: decrypt(ai.keyEnc) }
 }
 
+// Receives what the model writes as it streams: its reasoning summary (when available) and its answer.
+export type AiLog = (kind: "thinking" | "output", text: string) => void
+
 // Asks the model for JSON matching `schema`. Returns the validated object.
-export async function generateJson<T extends z.ZodType>(ai: AiSettings, system: string, prompt: string, schema: T): Promise<z.infer<T>> {
-  return ai.provider === "anthropic" ? anthropicJson(ai, system, prompt, schema) : openAiJson(ai, system, prompt, schema)
+export async function generateJson<T extends z.ZodType>(
+  ai: AiSettings,
+  system: string,
+  prompt: string,
+  schema: T,
+  log: AiLog = () => {}
+): Promise<z.infer<T>> {
+  return ai.provider === "anthropic" ? anthropicJson(ai, system, prompt, schema, log) : openAiJson(ai, system, prompt, schema, log)
 }
 
-async function anthropicJson<T extends z.ZodType>(ai: AiSettings, system: string, prompt: string, schema: T): Promise<z.infer<T>> {
+async function anthropicJson<T extends z.ZodType>(ai: AiSettings, system: string, prompt: string, schema: T, log: AiLog): Promise<z.infer<T>> {
   const client = new Anthropic({ apiKey: ai.apiKey, baseURL: ai.baseUrl || undefined, maxRetries: 2 })
+  // Without parse(), so the SDK doesn't auto-parse (and throw) before a refusal can be checked.
+  const { parse, ...format } = zodOutputFormat(schema)
+  void parse
+  // Claude on Anthropic's API can return a readable summary of its reasoning for the console.
+  const summarized = !ai.baseUrl && ai.model.startsWith("claude-")
   try {
-    // create() rather than parse(): parse() throws on a refusal before stop_reason can be checked.
-    const response = await client.messages.create({
+    // Streamed so bytes keep flowing: proxies such as Cloudflare drop requests that are silent for ~100s (HTTP 524).
+    const stream = client.messages.stream({
       model: ai.model,
-      max_tokens: 16000,
+      max_tokens: 64000,
       system,
       messages: [{ role: "user", content: prompt }],
-      output_config: { format: zodOutputFormat(schema) },
+      output_config: { format },
+      ...(summarized ? { thinking: { type: "adaptive" as const, display: "summarized" as const } } : {}),
     })
+    stream.on("streamEvent", (event) => {
+      if (event.type !== "content_block_delta") return
+      if (event.delta.type === "thinking_delta") log("thinking", event.delta.thinking)
+      else if (event.delta.type === "text_delta") log("output", event.delta.text)
+    })
+    const response = await stream.finalMessage()
     if (response.stop_reason === "refusal") throw new AiError("The model declined this request")
     if (response.stop_reason === "max_tokens") throw new AiError("The model's answer was cut off; try again")
     const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("")
@@ -70,13 +91,16 @@ function toAiError(e: unknown): Error {
   if (e instanceof Anthropic.PermissionDeniedError) return new AiError("The API key isn't allowed to use this model")
   if (e instanceof Anthropic.NotFoundError) return new AiError("Model or endpoint not found; check the model name and base URL")
   if (e instanceof Anthropic.RateLimitError) return new AiError("The AI provider is rate limiting requests; try again shortly")
+  if (e instanceof Anthropic.APIError && (e.status === 504 || e.status === 524)) {
+    return new AiError(`The AI provider timed out (HTTP ${e.status}); try again or pick a faster model`)
+  }
   if (e instanceof Anthropic.BadRequestError) return new AiError(`The AI provider rejected the request: ${e.message}`)
   if (e instanceof Anthropic.APIError) return new AiError(`AI provider error${e.status ? ` ${e.status}` : ""}: ${e.message}`)
   return new AiError(`Couldn't reach the AI provider: ${(e as Error).message}`)
 }
 
 // OpenAI-compatible Chat Completions (OpenAI, and the many providers that mirror its API).
-async function openAiJson<T extends z.ZodType>(ai: AiSettings, system: string, prompt: string, schema: T): Promise<z.infer<T>> {
+async function openAiJson<T extends z.ZodType>(ai: AiSettings, system: string, prompt: string, schema: T, log: AiLog): Promise<z.infer<T>> {
   const schemaHint = JSON.stringify(z.toJSONSchema(schema))
   const body = {
     model: ai.model,
@@ -85,6 +109,7 @@ async function openAiJson<T extends z.ZodType>(ai: AiSettings, system: string, p
       { role: "user", content: prompt },
     ],
     response_format: { type: "json_object" },
+    stream: true,
   }
   let res = await chatCompletions(ai, body)
   // Some compatible servers don't support response_format; retry without it.
@@ -92,9 +117,38 @@ async function openAiJson<T extends z.ZodType>(ai: AiSettings, system: string, p
   if (res.status === 401 || res.status === 403) throw new AiError("The AI provider rejected the API key")
   if (res.status === 404) throw new AiError("Model or endpoint not found; check the model name and base URL")
   if (res.status === 429) throw new AiError("The AI provider is rate limiting requests; try again shortly")
+  if (res.status === 524 || res.status === 504) throw new AiError(`The AI provider timed out (HTTP ${res.status}); try again or pick a faster model`)
   if (!res.ok) throw new AiError(`AI provider error ${res.status}`)
-  const data = await res.json()
-  return parseJson(data.choices?.[0]?.message?.content ?? "", schema)
+  return parseJson(await readCompletion(res, log), schema)
+}
+
+// Collects the text of a streamed (SSE) completion, or of a plain JSON one from servers that ignore `stream`.
+async function readCompletion(res: Response, log: AiLog): Promise<string> {
+  if (!res.headers.get("content-type")?.includes("text/event-stream")) {
+    const data = await res.json()
+    const content: string = data.choices?.[0]?.message?.content ?? ""
+    log("output", content)
+    return content
+  }
+  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ""
+  let text = ""
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (value) buffer += value
+    const lines = buffer.split("\n")
+    buffer = done ? "" : lines.pop()!
+    for (const line of lines) {
+      const data = line.startsWith("data:") ? line.slice(5).trim() : ""
+      if (!data || data === "[DONE]") continue
+      const chunk = JSON.parse(data)
+      if (chunk.error) throw new AiError(`AI provider error: ${chunk.error.message ?? "stream failed"}`)
+      const delta: string = chunk.choices?.[0]?.delta?.content ?? ""
+      if (delta) log("output", delta)
+      text += delta
+    }
+    if (done) return text
+  }
 }
 
 function parseJson<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
@@ -109,14 +163,25 @@ function parseJson<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
   return result.data
 }
 
-function chatCompletions(ai: AiSettings, body: object) {
-  return fetch(`${(ai.baseUrl || DEFAULT_BASE_URL.openai).replace(/\/+$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
-    body: JSON.stringify(body),
-    cache: "no-store",
-    signal: AbortSignal.timeout(300_000),
-  }).catch((e) => {
+// Retries once on gateway errors (502/503/524) and network failures.
+async function chatCompletions(ai: AiSettings, body: object): Promise<Response> {
+  const send = () =>
+    fetch(`${(ai.baseUrl || DEFAULT_BASE_URL.openai).replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: AbortSignal.timeout(600_000),
+    })
+  try {
+    const res = await send()
+    if (![502, 503, 524].includes(res.status)) return res
+    await res.body?.cancel()
+  } catch {
+    // fall through to the single retry
+  }
+  await new Promise((r) => setTimeout(r, 2000))
+  return send().catch((e) => {
     throw new AiError(`Couldn't reach the AI provider: ${(e as Error).message}`)
   })
 }

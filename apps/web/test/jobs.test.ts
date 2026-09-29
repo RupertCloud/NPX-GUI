@@ -16,3 +16,22 @@ test("jobs: stale detection and runner token", async () => {
   assert.ok(!checkRunnerToken("j1", null))
   assert.ok(!checkRunnerToken("j1", "x".repeat(64)))
 })
+
+test("jobs: appendLog merges streamed chunks and caps size", async () => {
+  const { appendLog } = await import("../src/lib/job-utils")
+  const lines = appendLog([], "step", "Reading repo")
+  appendLog(lines, "output", '{"cau')
+  appendLog(lines, "output", 'se": "x"}')
+  appendLog(lines, "step", "Opening PR")
+  appendLog(lines, "step", "Done")
+  assert.deepEqual(lines.map((l) => [l.kind, l.text]), [
+    ["step", "Reading repo"],
+    ["output", '{"cause": "x"}'],
+    ["step", "Opening PR"],
+    ["step", "Done"],
+  ])
+  const big = appendLog([], "output", "a".repeat(100_000))
+  appendLog(big, "step", "b".repeat(50_000))
+  assert.ok(big.reduce((n, l) => n + l.text.length, 0) <= 120_000)
+  assert.equal(big[big.length - 1].kind, "step")
+})

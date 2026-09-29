@@ -16,7 +16,7 @@ export function NextStepCell({ step, packageId, hasAi }: { step: NextStep; packa
   )
   switch (step.kind) {
     case "job":
-      return <JobStatus initial={toJobView(step.job)} label={step.label} compact />
+      return <JobStatus initial={{ ...toJobView(step.job), logs: [] }} label={step.label} compact />
     case "merge-workflow":
       return (
         <ActionForm action={mergePackagePr.bind(null, packageId, "workflow")}>
