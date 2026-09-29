@@ -192,12 +192,8 @@ export async function openLauncherPr(
     title: `Make ${pkg.npmName} runnable with npx`,
     body,
     files: [
-      { path: joinPath(pkg.directory, binPath), content: launcherScript(pkg.npmName, config), message: "feat: add npx launcher" },
-      {
-        path: joinPath(pkg.directory, "package.json"),
-        content: JSON.stringify(manifest, null, indent) + "\n",
-        message: "feat: add bin for npx",
-      },
+      { path: joinPath(pkg.directory, binPath), content: launcherScript(pkg.npmName, config) },
+      { path: joinPath(pkg.directory, "package.json"), content: JSON.stringify(manifest, null, indent) + "\n" },
     ],
   })
 }

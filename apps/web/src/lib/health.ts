@@ -11,6 +11,7 @@ export type NextStep =
   | { kind: "workflow"; outdated: boolean }
   | { kind: "token" }
   | { kind: "fix"; releaseId: string; version: string }
+  | { kind: "review-fix"; releaseId: string }
   | { kind: "merge-launcher"; number: number }
   | { kind: "runnable" }
   | { kind: "ready" }
@@ -36,8 +37,10 @@ export async function nextStep(token: string, pkg: Package, lastRelease: Release
       return n ? { kind: "merge-workflow", number: n } : { kind: "workflow", outdated: !!workflow }
     }
     if (secret === false) return { kind: "token" }
-    if (lastRelease?.status === "failed" && lastRelease.runId && !lastRelease.fix?.prUrl) {
-      return { kind: "fix", releaseId: lastRelease.id, version: lastRelease.version }
+    if (lastRelease?.status === "failed" && lastRelease.runId) {
+      const fix = lastRelease.fix
+      if (fix?.edits?.length && !fix.commitSha) return { kind: "review-fix", releaseId: lastRelease.id }
+      if (!fix) return { kind: "fix", releaseId: lastRelease.id, version: lastRelease.version }
     }
     if (manifest && !manifest.bin) {
       const n = await openPr(token, pkg, pkg.launcherPrUrl)

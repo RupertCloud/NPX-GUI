@@ -25,6 +25,8 @@ import {
   getRepo,
   GitHubError,
   mergePull,
+  commitFiles,
+  openFilesPr,
   openWorkflowPr,
   pullNumber,
   setRepoSecret,
@@ -38,6 +40,8 @@ import { checkBaseUrl, DEFAULT_MODEL, getAiSettings, testAi, type StoredAiSettin
 import { encrypt } from "@/lib/crypto"
 import { db } from "@/lib/firebase/admin"
 import { createJob, kickOff, type JobKind } from "@/lib/jobs"
+import { releaseLogToken } from "@/lib/job-utils"
+import { fixPrBody } from "@/lib/fix"
 
 export type ActionResult = { error?: string; ok?: string } | undefined
 
@@ -213,20 +217,74 @@ export async function suggestReleaseFix(id: string): Promise<ActionResult> {
   }
 }
 
-// Merges the AI fix PR for a release.
-export async function mergeFixPr(id: string): Promise<ActionResult> {
+async function releaseAndPackage(user: User, id: string) {
+  const release = await getRelease(id)
+  const pkg = release && (await getPackage(user, release.packageId))
+  if (!release || !pkg) throw new Error("Release not found")
+  return { release, pkg }
+}
+
+// Applies the AI's proposed fix: as a PR, or committed straight to the release branch and released again.
+export async function applyFix(id: string, mode: "pr" | "commit"): Promise<ActionResult> {
+  let next: string | null = null
   try {
     const user = await requireUser()
-    const release = await getRelease(id)
-    const pkg = release && (await getPackage(user, release.packageId))
-    const number = release?.fix?.prUrl && pkg ? pullNumber(release.fix.prUrl, pkg.repo) : null
-    if (!release || !pkg || !number) return { error: "No fix PR to merge" }
-    await mergePull(user.githubToken, pkg.repo, number)
-    revalidatePath(`/releases/${id}`)
-    return { ok: "Merged. Retry the release when ready." }
+    const { release, pkg } = await releaseAndPackage(user, id)
+    const fix = release.fix
+    if (!fix?.edits?.length) return { error: "No proposed changes to apply" }
+    const files = fix.edits.map((e) => ({ path: e.path, content: e.content }))
+    const title = `Fix release of ${release.npmName}@${release.version}`
+    if (mode === "pr") {
+      const prUrl = await openFilesPr(user.githubToken, pkg.repo, release.branch, {
+        branch: `npxhub/fix-${Date.now()}`,
+        title,
+        body: fixPrBody(release, fix),
+        files,
+      })
+      await updateRelease(id, { fix: { ...fix, prUrl } })
+      revalidatePath(`/releases/${id}`)
+      return { ok: "Fix PR opened" }
+    }
+    let sha: string
+    try {
+      sha = await commitFiles(user.githubToken, pkg.repo, release.branch, files, `fix: ${title.toLowerCase()} (npxhub AI)`)
+    } catch (e) {
+      if (e instanceof GitHubError && (e.status === 409 || e.status === 422)) {
+        return { error: `${release.branch} doesn't accept direct commits (branch protection). Use "Open PR" instead.` }
+      }
+      throw e
+    }
+    await updateRelease(id, { fix: { ...fix, commitSha: sha } })
+    const result = await launchRelease(user, pkg, release)
+    if ("error" in result) return { error: `Committed ${sha.slice(0, 7)}, but the retry didn't start: ${result.error}` }
+    next = result.id
   } catch (e) {
     return { error: message(e) }
   }
+  redirect(`/releases/${next}`)
+}
+
+// Merges the AI fix PR for a release, optionally starting the release again right after.
+export async function mergeFixPr(id: string, retry = false): Promise<ActionResult> {
+  let next: string | null = null
+  try {
+    const user = await requireUser()
+    const { release, pkg } = await releaseAndPackage(user, id)
+    const number = release.fix?.prUrl ? pullNumber(release.fix.prUrl, pkg.repo) : null
+    if (!number) return { error: "No fix PR to merge" }
+    await mergePull(user.githubToken, pkg.repo, number)
+    revalidatePath(`/releases/${id}`)
+    if (!retry) return { ok: "Merged. Retry the release when ready." }
+    const result = await launchRelease(user, pkg, release)
+    if ("error" in result) return { error: `Merged, but the retry didn't start: ${result.error}` }
+    next = result.id
+  } catch (e) {
+    if (e instanceof GitHubError && (e.status === 405 || e.status === 409)) {
+      return { error: `GitHub couldn't merge it: ${e.message}. Check the PR's required reviews or checks on GitHub.` }
+    }
+    return { error: message(e) }
+  }
+  redirect(`/releases/${next}`)
 }
 
 export async function setNpmToken(id: string, _prev: ActionResult, formData: FormData): Promise<ActionResult> {
@@ -322,6 +380,8 @@ async function launchRelease(user: User, pkg: Package, input: ReleaseInput): Pro
       notes,
       provenance: !pkg.private,
       release_id: created.id,
+      log_url: `${await origin()}/api/releases/${created.id}/log`,
+      log_token: releaseLogToken(created.id),
     })
     await updateRelease(created.id, { status: "running" })
   } catch (e) {

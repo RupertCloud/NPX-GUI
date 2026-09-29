@@ -38,9 +38,30 @@ export function runnerToken(jobId: string) {
 }
 
 export function checkRunnerToken(jobId: string, token: string | null) {
-  const expected = Buffer.from(runnerToken(jobId))
-  const given = Buffer.from(token ?? "")
-  return given.length === expected.length && timingSafeEqual(given, expected)
+  return safeEqual(runnerToken(jobId), token)
+}
+
+// Lets a release's workflow send its step output to npxhub, for that release only.
+export function releaseLogToken(releaseId: string) {
+  return createHmac("sha256", Buffer.from(process.env.TOKEN_ENCRYPTION_KEY ?? "", "base64")).update(`release-log:${releaseId}`).digest("hex")
+}
+
+export function checkReleaseLogToken(releaseId: string, token: string | null) {
+  return safeEqual(releaseLogToken(releaseId), token)
+}
+
+function safeEqual(expected: string, token: string | null) {
+  const a = Buffer.from(expected)
+  const b = Buffer.from(token ?? "")
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+const MAX_STEP_LOG = 40_000
+
+// Appends output to one step's live log, keeping only its most recent part.
+export function appendStepLog(current: string | undefined, text: string) {
+  const next = (current ?? "") + text
+  return next.length > MAX_STEP_LOG ? "…\n" + next.slice(-MAX_STEP_LOG) : next
 }
 
 // What the page needs to render a job; safe to pass to client components.

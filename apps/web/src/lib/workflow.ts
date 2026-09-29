@@ -16,10 +16,64 @@ export const RELEASE_STEPS = [
 ] as const
 
 // Bump when the template changes; repos with an older marker are offered an update PR.
-export const WORKFLOW_VERSION = 2
+export const WORKFLOW_VERSION = 3
 export const WORKFLOW_MARKER = `# npxhub-workflow: v${WORKFLOW_VERSION}`
 
 export const isCurrentWorkflow = (content: string | null) => !!content?.includes(WORKFLOW_MARKER)
+
+// Runs a workflow step with bash, mirrors its output to the GitHub log, and sends it to npxhub
+// every 2 seconds so the release page can show it live. Values of env vars whose names contain
+// TOKEN, SECRET, PASSWORD or KEY are replaced with ***. Sending problems never affect the step.
+export const LOG_HELPER_JS = String.raw`"use strict"
+const { spawn } = require("node:child_process")
+const step = Number(process.argv[2])
+const script = process.argv[3]
+const url = process.env.NPXHUB_LOG_URL
+const token = process.env.NPXHUB_LOG_TOKEN
+const secrets = Object.keys(process.env)
+  .filter((k) => ["TOKEN", "SECRET", "PASSWORD", "KEY"].some((s) => k.toUpperCase().includes(s)))
+  .map((k) => process.env[k])
+  .filter((v) => v && v.length >= 8)
+let pending = ""
+let queue = Promise.resolve()
+function redact(text) {
+  for (const s of secrets) text = text.split(s).join("***")
+  return text
+}
+function send(final) {
+  const cut = final ? pending.length : pending.lastIndexOf("\n") + 1
+  if (!url || cut === 0) return queue
+  const text = redact(pending.slice(0, cut))
+  pending = pending.slice(cut)
+  const body = JSON.stringify({ step: step, text: text })
+  const headers = { "content-type": "application/json", "x-npxhub-log-token": token }
+  queue = queue
+    .then(() => fetch(url, { method: "POST", headers: headers, body: body, signal: AbortSignal.timeout(10000) }))
+    .catch(() => {})
+  return queue
+}
+const timer = setInterval(() => send(false), 2000)
+const child = spawn("bash", ["--noprofile", "--norc", "-eo", "pipefail", script], { stdio: ["inherit", "pipe", "pipe"] })
+child.stdout.on("data", (d) => {
+  process.stdout.write(d)
+  pending += d
+})
+child.stderr.on("data", (d) => {
+  process.stderr.write(d)
+  pending += d
+})
+child.on("close", (code) => {
+  clearInterval(timer)
+  if (code !== 0) pending += "\n[step exited with code " + code + "]\n"
+  send(true).then(() => process.exit(code === null ? 1 : code))
+})
+`
+
+const indent = (text: string, spaces: number) =>
+  text
+    .split("\n")
+    .map((line) => (line ? " ".repeat(spaces) + line : line))
+    .join("\n")
 
 export const WORKFLOW_YAML = `# Added by npxhub. Releases are started from the npxhub dashboard.
 ${WORKFLOW_MARKER}
@@ -36,6 +90,8 @@ on:
       notes: { description: "Release notes", required: false, type: string, default: "" }
       provenance: { description: "Publish with provenance", required: false, type: boolean, default: false }
       release_id: { description: "npxhub release id", required: true, type: string }
+      log_url: { description: "Where to send live step output", required: false, type: string, default: "" }
+      log_token: { description: "Token for log_url", required: false, type: string, default: "" }
 
 permissions:
   contents: write
@@ -57,6 +113,8 @@ jobs:
       DIST_TAG: \${{ inputs.tag }}
       GIT_TAG: \${{ inputs.git_tag }}
       NOTES: \${{ inputs.notes }}
+      NPXHUB_LOG_URL: \${{ inputs.log_url }}
+      NPXHUB_LOG_TOKEN: \${{ inputs.log_token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -69,7 +127,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Set up npxhub log
+        run: |
+          if [ -n "$NPXHUB_LOG_TOKEN" ]; then echo "::add-mask::$NPXHUB_LOG_TOKEN"; fi
+          cat > /tmp/npxhub-log.cjs <<'NPXHUB_EOF'
+${indent(LOG_HELPER_JS, 10)}
+          NPXHUB_EOF
+
       - name: Bump version and commit
+        shell: node /tmp/npxhub-log.cjs 2 {0}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -78,6 +144,7 @@ jobs:
           if git diff --quiet; then echo "package.json already at $VERSION"; else git commit -am "chore(release): $GIT_TAG"; fi
 
       - name: Build and test
+        shell: node /tmp/npxhub-log.cjs 3 {0}
         run: |
           if [ -f package-lock.json ]; then npm ci
           elif [ -f "$GITHUB_WORKSPACE/package-lock.json" ]; then (cd "$GITHUB_WORKSPACE" && npm ci)
@@ -87,12 +154,16 @@ jobs:
           npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
           node -e '
             const files = require(process.env.RUNNER_TEMP + "/pack.json")[0].files.map(f => f.path)
-            const bad = files.filter(p => /(^|\\/)(\\.env[^/]*|[^/]*\\.pem|id_rsa[^/]*)$/.test(p))
+            // Templates such as .env.example or .env.staging.example are allowed; real env files and keys are not.
+            const secretLike = files.filter(p => /(^|\\/)(\\.env[^/]*|[^/]*\\.pem|id_rsa[^/]*)$/.test(p))
+            const bad = secretLike.filter(p => !/\\.(example|sample|template|dist|pub)$/.test(p))
+            if (secretLike.length > bad.length) console.log("Allowed templates: " + secretLike.filter(p => !bad.includes(p)).join(", "))
             console.log(files.length + " files in tarball")
             if (bad.length) { console.error("Blocked: secret-looking files in tarball: " + bad.join(", ")); process.exit(1) }
           '
 
       - name: Tag and GitHub release
+        shell: node /tmp/npxhub-log.cjs 4 {0}
         env:
           GH_TOKEN: \${{ github.token }}
         run: |
@@ -109,6 +180,7 @@ jobs:
           if gh release view "$GIT_TAG" > /dev/null 2>&1; then echo "Release $GIT_TAG already exists"; else gh release create "$GIT_TAG" "\${FLAGS[@]}"; fi
 
       - name: Publish to npm
+        shell: node /tmp/npxhub-log.cjs 5 {0}
         env:
           NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}
           PROVENANCE: \${{ inputs.provenance }}
@@ -119,6 +191,7 @@ jobs:
           npm publish "\${FLAGS[@]}"
 
       - name: Verify install
+        shell: node /tmp/npxhub-log.cjs 6 {0}
         run: |
           NAME=$(node -p "require('./package.json').name")
           HAS_BIN=$(node -p "Boolean(require('./package.json').bin)")

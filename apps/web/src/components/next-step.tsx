@@ -41,6 +41,8 @@ export function NextStepCell({ step, packageId, hasAi }: { step: NextStep; packa
       ) : (
         link(`/releases/${step.releaseId}`, `See why ${step.version} failed`)
       )
+    case "review-fix":
+      return link(`/releases/${step.releaseId}`, "Review AI fix")
     case "merge-launcher":
       return (
         <ActionForm action={mergePackagePr.bind(null, packageId, "launcher")}>

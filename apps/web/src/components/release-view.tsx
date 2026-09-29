@@ -9,10 +9,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import type { Release } from "@/lib/data"
 import { RELEASE_STEPS } from "@/lib/workflow"
-import { mergeFixPr, retryRelease, suggestReleaseFix } from "@/app/(dashboard)/actions"
+import { applyFix, mergeFixPr, retryRelease, suggestReleaseFix } from "@/app/(dashboard)/actions"
 import { ActionForm } from "@/components/action-form"
 import { SubmitButton } from "@/components/submit-button"
 import { JobStatus, type JobView } from "@/components/job-status"
+import { LogConsole } from "@/components/log-console"
 
 const TERMINAL = ["succeeded", "failed", "cancelled"]
 
@@ -103,23 +104,12 @@ export function ReleaseView({ initial, log, fixJob }: { initial: Release; log: s
                   <span className="font-medium">Cause:</span> {initial.fix.cause}
                 </p>
                 <p className="text-muted-foreground">{initial.fix.summary}</p>
-                {initial.fix.prUrl ? (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <a href={initial.fix.prUrl} className="underline" target="_blank" rel="noreferrer">
-                      Fix PR ({initial.fix.files.join(", ")})
-                    </a>
-                    <ActionForm action={mergeFixPr.bind(null, release.id)}>
-                      <SubmitButton size="sm">Merge fix PR</SubmitButton>
-                    </ActionForm>
-                  </div>
-                ) : (
-                  <p className="text-muted-foreground">No file changes proposed; follow the advice above, then retry.</p>
-                )}
+                <FixProposal release={initial} />
               </>
             ) : (
               <p className="text-muted-foreground">
-                Your AI provider reads the job log and the files it mentions, explains the failure and opens a fix PR for you to
-                review. Set a provider in Settings first.
+                Your AI provider reads the job log and the files it mentions, explains the failure and proposes file changes
+                for you to review and apply. Set a provider in Settings first.
               </p>
             )}
             {fixJob && <JobStatus initial={fixJob} label="Diagnosing with AI" />}
@@ -153,6 +143,10 @@ export function ReleaseView({ initial, log, fixJob }: { initial: Release; log: s
           ))}
         </ol>
       </Card>
+
+      <div className="mt-4">
+        <ReleaseConsole release={release} />
+      </div>
 
       {log && (
         <details className="mt-4" open={release.status === "failed"}>
@@ -190,5 +184,91 @@ export function ReleaseView({ initial, log, fixJob }: { initial: Release; log: s
         </Card>
       </div>
     </>
+  )
+}
+
+// Live output of each workflow step, sent by the npxhub log helper in the workflow (v3 and later).
+function ReleaseConsole({ release }: { release: Release }) {
+  const live = release.liveLog ?? {}
+  const steps = Object.keys(live).map(Number).sort((a, b) => a - b)
+  const running = release.status === "queued" || release.status === "running"
+  const size = steps.reduce((n, s) => n + live[s].length, 0)
+  if (!steps.length && !running) return null
+  return (
+    <LogConsole count={steps.length ? `${steps.length} of ${RELEASE_STEPS.length} steps` : "waiting"} active={running} size={size}>
+      {!steps.length && (
+        <div className="text-[#9c9a92]">
+          Waiting for output… Live output needs the current npxhub workflow; older workflows only show the full log when the run
+          ends.
+        </div>
+      )}
+      {steps.map((s) => (
+        <div key={s} className="mb-2">
+          <div className="text-[#d97757]">
+            ── {s} {RELEASE_STEPS[s - 1]} ──
+          </div>
+          {live[s]}
+        </div>
+      ))}
+    </LogConsole>
+  )
+}
+
+// The AI's proposed changes, with the ways to apply them.
+function FixProposal({ release }: { release: Release }) {
+  const fix = release.fix!
+  const edits = fix.edits ?? []
+  if (!edits.length && !fix.prUrl) {
+    return <p className="text-muted-foreground">No file changes proposed; follow the advice above, then retry.</p>
+  }
+  return (
+    <div className="space-y-3">
+      {edits.length > 0 && (
+        <ul className="divide-y rounded-lg border">
+          {edits.map((e) => (
+            <li key={e.path} className="px-3 py-2">
+              <details>
+                <summary className="flex cursor-pointer items-center gap-2">
+                  <span className={cn("rounded px-1.5 text-xs font-medium", e.isNew ? "bg-success/15 text-success" : "bg-warning/15 text-warning")}>
+                    {e.isNew ? "new" : "edit"}
+                  </span>
+                  <code className="font-mono">{e.path}</code>
+                  <span className="text-muted-foreground">{e.reason}</span>
+                </summary>
+                <pre className="mt-2 max-h-72 overflow-auto rounded bg-[#1f1e1d] p-2 font-mono text-xs text-[#e8e6dc]">{e.content}</pre>
+              </details>
+            </li>
+          ))}
+        </ul>
+      )}
+      {fix.commitSha ? (
+        <p className="text-success">Committed {fix.commitSha.slice(0, 7)} to {release.branch} and released again.</p>
+      ) : fix.prUrl ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <a href={fix.prUrl} className="mr-2 underline" target="_blank" rel="noreferrer">
+            Fix PR
+          </a>
+          <ActionForm action={mergeFixPr.bind(null, release.id, true)}>
+            <SubmitButton size="sm">Merge &amp; retry</SubmitButton>
+          </ActionForm>
+          <ActionForm action={mergeFixPr.bind(null, release.id, false)}>
+            <SubmitButton size="sm" variant="outline">
+              Merge only
+            </SubmitButton>
+          </ActionForm>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <ActionForm action={applyFix.bind(null, release.id, "commit")}>
+            <SubmitButton size="sm">Commit to {release.branch} &amp; retry</SubmitButton>
+          </ActionForm>
+          <ActionForm action={applyFix.bind(null, release.id, "pr")}>
+            <SubmitButton size="sm" variant="outline">
+              Open PR
+            </SubmitButton>
+          </ActionForm>
+        </div>
+      )}
+    </div>
   )
 }
