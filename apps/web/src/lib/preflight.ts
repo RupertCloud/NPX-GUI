@@ -2,7 +2,7 @@ import "server-only"
 import { checkSummary, getFile, getPackageJson, hasRepoSecret, joinPath } from "./github"
 import type { Package } from "./data"
 import type { NpmInfo } from "./npm"
-import { JOB_NAME, WORKFLOW_PATH } from "./workflow"
+import { isCurrentWorkflow, JOB_NAME, WORKFLOW_PATH } from "./workflow"
 
 export type Check = { label: string; level: "blocker" | "warning"; passed: boolean; detail?: string }
 
@@ -23,11 +23,12 @@ export async function preflight(token: string, pkg: Package, branch: string, npm
     passed: manifest.name === pkg.npmName,
     detail: manifest.name === pkg.npmName ? undefined : `package.json says ${String(manifest.name)}`,
   })
+  const current = isCurrentWorkflow(workflow)
   checks.push({
-    label: "Publish workflow on this branch",
+    label: "Current publish workflow on this branch",
     level: "blocker",
-    passed: !!workflow,
-    detail: workflow ? WORKFLOW_PATH : pkg.workflowPrUrl ? "Merge the npxhub workflow PR first" : "Open the workflow PR from the package page",
+    passed: current,
+    detail: current ? WORKFLOW_PATH : workflow ? "The workflow is outdated; update it from the package page" : "Add the workflow from the package page",
   })
   checks.push(
     secret === null

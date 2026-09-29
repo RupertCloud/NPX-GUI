@@ -9,6 +9,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import type { Release } from "@/lib/data"
 import { RELEASE_STEPS } from "@/lib/workflow"
+import { mergeFixPr, retryRelease, suggestReleaseFix } from "@/app/(dashboard)/actions"
+import { ActionForm } from "@/components/action-form"
+import { SubmitButton } from "@/components/submit-button"
 
 const TERMINAL = ["succeeded", "failed", "cancelled"]
 
@@ -50,7 +53,16 @@ export function ReleaseView({ initial, log }: { initial: Release; log: string | 
             </Link>
             <span className="font-mono text-2xl">@{release.version}</span>
           </h1>
-          <StatusBadge status={release.status} />
+          <div className="flex items-center gap-3">
+            <StatusBadge status={release.status} />
+            {(release.status === "failed" || release.status === "cancelled") && (
+              <ActionForm action={retryRelease.bind(null, release.id)}>
+                <SubmitButton size="sm" variant="outline">
+                  Retry release
+                </SubmitButton>
+              </ActionForm>
+            )}
+          </div>
         </div>
         <p className="mt-1.5 text-muted-foreground">
           <span className="font-mono">{release.distTag}</span> · branch <span className="font-mono">{release.branch}</span> ·
@@ -70,6 +82,51 @@ export function ReleaseView({ initial, log }: { initial: Release; log: string | 
         <p role="alert" className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
           {release.error}
         </p>
+      )}
+      {release.status === "failed" && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          Fix the cause shown in the job log below (in your repo, or on the package page for setup problems), then retry. A retry reuses the
+          same version, tag and notes.
+        </p>
+      )}
+      {release.status === "failed" && release.runId && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle>AI diagnosis</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {initial.fix ? (
+              <>
+                <p>
+                  <span className="font-medium">Cause:</span> {initial.fix.cause}
+                </p>
+                <p className="text-muted-foreground">{initial.fix.summary}</p>
+                {initial.fix.prUrl ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <a href={initial.fix.prUrl} className="underline" target="_blank" rel="noreferrer">
+                      Fix PR ({initial.fix.files.join(", ")})
+                    </a>
+                    <ActionForm action={mergeFixPr.bind(null, release.id)}>
+                      <SubmitButton size="sm">Merge fix PR</SubmitButton>
+                    </ActionForm>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">No file changes proposed; follow the advice above, then retry.</p>
+                )}
+              </>
+            ) : (
+              <p className="text-muted-foreground">
+                Your AI provider reads the job log and the files it mentions, explains the failure and opens a fix PR for you to
+                review. Set a provider in Settings first.
+              </p>
+            )}
+            <ActionForm action={suggestReleaseFix.bind(null, release.id)}>
+              <SubmitButton variant="outline" size="sm">
+                {initial.fix ? "Ask again" : "Suggest a fix with AI"}
+              </SubmitButton>
+            </ActionForm>
+          </CardContent>
+        </Card>
       )}
       {syncError && <p className="mb-4 text-sm text-warning">Couldn&apos;t reach GitHub: {syncError}</p>}
       {release.status === "running" && !release.runId && (

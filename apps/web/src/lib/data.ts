@@ -16,6 +16,7 @@ export type Package = {
   private: boolean
   members: Record<string, Role> // GitHub login → role
   workflowPrUrl?: string
+  launcherPrUrl?: string
   npmTokenSetAt?: string
   npmTokenSetBy?: string
   createdAt: string
@@ -40,6 +41,7 @@ export type Release = {
   steps?: StepStatus[]
   provenanceUrl?: string
   error?: string
+  fix?: { cause: string; summary: string; prUrl?: string; files: string[] }
 }
 
 const packages = db.collection("packages")

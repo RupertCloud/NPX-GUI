@@ -41,3 +41,15 @@ test("sealed box is decryptable with the repo key (as GitHub does)", async () =>
   const sealed = sodium.crypto_box_seal(sodium.from_string("npm_abc"), kp.publicKey)
   assert.equal(sodium.to_string(sodium.crypto_box_seal_open(sealed, kp.publicKey, kp.privateKey)), "npm_abc")
 })
+
+test("workflow version and PR number helpers", async () => {
+  const { isCurrentWorkflow, WORKFLOW_YAML } = await import("../src/lib/workflow")
+  assert.ok(isCurrentWorkflow(WORKFLOW_YAML))
+  assert.ok(!isCurrentWorkflow("# Added by npxhub.\nname: npxhub publish\n"))
+  assert.ok(!isCurrentWorkflow(null))
+  const { pullNumber } = await import("../src/lib/github")
+  assert.equal(pullNumber("https://github.com/Feyti/EvalDoc/pull/12", "Feyti/EvalDoc"), 12)
+  assert.equal(pullNumber("https://github.com/feyti/evaldoc/pull/3", "Feyti/EvalDoc"), 3)
+  assert.equal(pullNumber("https://github.com/Other/EvalDoc/pull/12", "Feyti/EvalDoc"), null)
+  assert.equal(pullNumber("https://github.com/a/b.c/pull/1", "a/bxc"), null) // dots are escaped
+})

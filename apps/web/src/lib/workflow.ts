@@ -15,7 +15,14 @@ export const RELEASE_STEPS = [
   "Verify install",
 ] as const
 
+// Bump when the template changes; repos with an older marker are offered an update PR.
+export const WORKFLOW_VERSION = 2
+export const WORKFLOW_MARKER = `# npxhub-workflow: v${WORKFLOW_VERSION}`
+
+export const isCurrentWorkflow = (content: string | null) => !!content?.includes(WORKFLOW_MARKER)
+
 export const WORKFLOW_YAML = `# Added by npxhub. Releases are started from the npxhub dashboard.
+${WORKFLOW_MARKER}
 name: npxhub publish
 run-name: npxhub \${{ inputs.release_id }}
 
@@ -52,12 +59,12 @@ jobs:
       NOTES: \${{ inputs.notes }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -67,7 +74,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          git commit -am "chore(release): $GIT_TAG"
+          # A first release can equal the version already in package.json; then there is nothing to commit.
+          if git diff --quiet; then echo "package.json already at $VERSION"; else git commit -am "chore(release): $GIT_TAG"; fi
 
       - name: Build and test
         run: |
@@ -88,11 +96,17 @@ jobs:
         env:
           GH_TOKEN: \${{ github.token }}
         run: |
-          git tag -a "$GIT_TAG" -m "$GIT_TAG"
-          git push origin "HEAD:$GITHUB_REF_NAME" --follow-tags
+          # Safe to re-run after a failed release: reuse an existing tag and release.
+          if git rev-parse -q --verify "refs/tags/$GIT_TAG" > /dev/null; then
+            echo "Tag $GIT_TAG already exists"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          else
+            git tag -a "$GIT_TAG" -m "$GIT_TAG"
+            git push origin "HEAD:$GITHUB_REF_NAME" --follow-tags
+          fi
           FLAGS=(--title "$GIT_TAG" --notes "$NOTES")
           if [ "$DIST_TAG" != "latest" ]; then FLAGS+=(--prerelease); fi
-          gh release create "$GIT_TAG" "\${FLAGS[@]}"
+          if gh release view "$GIT_TAG" > /dev/null 2>&1; then echo "Release $GIT_TAG already exists"; else gh release create "$GIT_TAG" "\${FLAGS[@]}"; fi
 
       - name: Publish to npm
         env:
