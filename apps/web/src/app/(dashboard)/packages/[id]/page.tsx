@@ -3,6 +3,7 @@ import { notFound } from "next/navigation"
 import { CheckCircle2, ExternalLink, TriangleAlert } from "lucide-react"
 import { ActionForm } from "@/components/action-form"
 import { CopyButton } from "@/components/copy-button"
+import { NpmTokenLink } from "@/components/npm-token-link"
 import { PageHeader } from "@/components/page-header"
 import { StatusBadge } from "@/components/status-badge"
 import { SubmitButton } from "@/components/submit-button"
@@ -133,18 +134,10 @@ export default async function PackagePage({ params }: { params: Promise<{ id: st
                 : secret === null
                   ? "Only repo admins can check repo secrets."
                   : "Not set."}{" "}
-              Create a{" "}
-              <a
-                href="https://www.npmjs.com/settings/~/tokens/granular-access-tokens/new"
-                className="underline"
-                target="_blank"
-                rel="noreferrer"
-              >
-                granular access token
-              </a>{" "}
-              with read and write access to this package. npxhub encrypts it straight into {pkg.repo}&apos;s GitHub secrets and does not
-              keep a copy.
+              Create a granular access token with read and write access to this package. npxhub encrypts it straight into {pkg.repo}&apos;s
+              GitHub secrets and does not keep a copy.
             </p>
+            <NpmTokenLink defaultUsername={npm?.maintainers[0] ?? ""} />
             {isAdmin ? (
               <ActionForm action={setNpmToken.bind(null, pkg.id)} className="mt-3">
                 <div className="flex max-w-lg gap-2">
