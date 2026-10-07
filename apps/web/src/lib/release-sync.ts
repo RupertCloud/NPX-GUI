@@ -5,6 +5,7 @@ import { updateRelease, type Release, type StepStatus } from "./data"
 import { RELEASE_STEPS } from "./workflow"
 
 const TERMINAL = ["succeeded", "failed", "cancelled"]
+const SYNC_INTERVAL_MS = 8000
 
 function stepStatus(s: JobStep | undefined): StepStatus {
   if (!s) return "pending"
@@ -18,6 +19,8 @@ function stepStatus(s: JobStep | undefined): StepStatus {
 // Pulls the latest state of a release from GitHub Actions and saves it (REL-2: works after downtime too).
 export async function syncRelease(token: string, release: Release): Promise<Release> {
   if (TERMINAL.includes(release.status)) return release
+  // Every open release page polls; asking GitHub at most every few seconds keeps within its API rate limit.
+  if (release.syncedAt && Date.now() - new Date(release.syncedAt).getTime() < SYNC_INTERVAL_MS) return release
 
   let { runId, runUrl } = release
   if (!runId) {
@@ -29,7 +32,9 @@ export async function syncRelease(token: string, release: Release): Promise<Rele
         await updateRelease(release.id, failed)
         return { ...release, ...failed }
       }
-      return release
+      const syncedAt = new Date().toISOString()
+      await updateRelease(release.id, { syncedAt })
+      return { ...release, syncedAt }
     }
     runId = run.id
     runUrl = run.html_url
@@ -37,7 +42,13 @@ export async function syncRelease(token: string, release: Release): Promise<Rele
 
   const [run, job] = await Promise.all([getRun(token, release.repo, runId), getRunJob(token, release.repo, runId)])
   const steps = RELEASE_STEPS.map((name) => stepStatus(job?.steps?.find((s) => s.name === name)))
-  const update: Partial<Release> = { runId, runUrl, steps, status: run.status === "completed" ? "failed" : "running" }
+  const update: Partial<Release> = {
+    runId,
+    runUrl,
+    steps,
+    status: run.status === "completed" ? "failed" : "running",
+    syncedAt: new Date().toISOString(),
+  }
 
   if (run.status === "completed") {
     update.status = run.conclusion === "success" ? "succeeded" : run.conclusion === "cancelled" ? "cancelled" : "failed"

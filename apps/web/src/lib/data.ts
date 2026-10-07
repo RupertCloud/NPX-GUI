@@ -44,6 +44,7 @@ export type Release = {
   error?: string
   fix?: FixResult
   liveLog?: Record<string, string> // step number → recent output sent by the workflow
+  syncedAt?: string // last status sync with GitHub Actions
 }
 
 const packages = db.collection("packages")

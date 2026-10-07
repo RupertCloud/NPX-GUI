@@ -1,7 +1,7 @@
 import "server-only"
 import { z } from "zod"
 import { generateJson, type AiSettings } from "./ai"
-import { getFile, getJobLog, getRunJob, joinPath, listFiles } from "./github"
+import { getFileEntry, getJobLog, getRunJob, joinPath, listFiles } from "./github"
 import type { Package, Release } from "./data"
 import type { JobLogger } from "./jobs"
 
@@ -19,25 +19,34 @@ const FixSchema = z.object({
     ),
 })
 
-export type FixEdit = { path: string; content: string; reason: string; isNew: boolean }
-export type FixResult = { cause: string; summary: string; edits: FixEdit[]; files: string[]; prUrl?: string; commitSha?: string }
+// baseSha is the file's blob SHA when the model read it, so applying can detect later changes.
+export type FixEdit = { path: string; content: string; reason: string; isNew: boolean; baseSha?: string }
+export type FixResult = {
+  cause: string
+  summary: string
+  edits: FixEdit[]
+  files: string[]
+  prUrl?: string
+  mergedAt?: string
+  commitSha?: string
+}
 
 const SAFE_PATH = /^(?!\/)(?!.*\.\.)(?!\.github\/)[\w@.\-/]+$/
 
 // Keeps edits to files the model was shown, plus new files inside the package directory.
 export function validateEdits(
   edits: { path: string; content: string; reason: string }[],
-  shown: { path: string; content: string }[],
+  shown: { path: string; content: string; sha?: string }[],
   existing: Set<string>,
   directory: string
 ): FixEdit[] {
   const prefix = directory === "." ? "" : `${directory.replace(/\/+$/, "")}/`
   const out: FixEdit[] = []
   for (const e of edits.slice(0, MAX_FILES)) {
-    if (e.content.length > MAX_FILE_BYTES || !SAFE_PATH.test(e.path)) continue
+    if (e.content.length > MAX_FILE_BYTES || !SAFE_PATH.test(e.path) || out.some((o) => o.path === e.path)) continue
     const before = shown.find((f) => f.path === e.path)
     if (before) {
-      if (before.content !== e.content) out.push({ ...e, isNew: false })
+      if (before.content !== e.content) out.push({ ...e, isNew: false, baseSha: before.sha })
     } else if (!existing.has(e.path) && e.path.startsWith(prefix)) {
       out.push({ ...e, isNew: true })
     }
@@ -69,10 +78,10 @@ export async function suggestFix(token: string, ai: AiSettings, pkg: Package, re
   const manifestPath = joinPath(pkg.directory, "package.json")
   const mentioned = paths.filter((p) => p !== manifestPath && cleaned.includes(p.split("/").slice(-2).join("/")))
   const candidates = [manifestPath, ...mentioned].slice(0, MAX_FILES)
-  const files: { path: string; content: string }[] = []
+  const files: { path: string; content: string; sha: string }[] = []
   for (const path of candidates) {
-    const content = await getFile(token, release.repo, path, release.branch)
-    if (content !== null && content.length <= MAX_FILE_BYTES) files.push({ path, content })
+    const entry = await getFileEntry(token, release.repo, path, release.branch)
+    if (entry && entry.content.length <= MAX_FILE_BYTES) files.push({ path, ...entry })
   }
 
   logger?.step(`Giving the model the log and ${files.map((f) => f.path).join(", ")}`)
@@ -92,7 +101,14 @@ export async function suggestFix(token: string, ai: AiSettings, pkg: Package, re
 
   const fix = await generateJson(ai, system, prompt, FixSchema, logger?.ai)
   logger?.step(`Cause: ${fix.cause}`)
-  const edits = validateEdits(fix.edits, files, new Set(paths), pkg.directory)
+  const proposed = validateEdits(fix.edits, files, new Set(paths), pkg.directory)
+  // The file list can be cut short in big repos, so confirm "new" files really don't exist yet.
+  const edits: FixEdit[] = []
+  for (const e of proposed) {
+    if (e.isNew && (await getFileEntry(token, release.repo, e.path, release.branch))) {
+      logger?.step(`Dropped the proposed new ${e.path}: it already exists and the model hasn't read it`)
+    } else edits.push(e)
+  }
   if (edits.length) logger?.step(`Proposed changes:\n${edits.map((e) => `  ${e.isNew ? "new" : "edit"} ${e.path}: ${e.reason}`).join("\n")}`)
   else logger?.step("No file changes proposed")
   return { cause: fix.cause, summary: fix.summary, edits, files: edits.map((e) => e.path) }
@@ -108,4 +124,13 @@ export function fixPrBody(release: Release, fix: FixResult) {
     "",
     `Suggested by AI from the failed job's log for ${release.npmName}@${release.version}. Review before merging, then retry the release in npxhub.`,
   ].join("\n")
+}
+
+// The first edited path that changed on the branch since the diagnosis (or now exists, for new files), if any.
+export async function fixConflict(token: string, repo: string, branch: string, edits: FixEdit[]): Promise<string | null> {
+  for (const e of edits) {
+    const current = await getFileEntry(token, repo, e.path, branch)
+    if (e.isNew ? current !== null : current?.sha !== e.baseSha) return e.path
+  }
+  return null
 }

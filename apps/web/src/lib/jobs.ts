@@ -95,12 +95,20 @@ function jobLogger(jobId: string) {
   return { logger, close }
 }
 
+export async function failJob(jobId: string, error: string) {
+  await jobs.doc(jobId).update({ status: "failed", finishedAt: new Date().toISOString(), error })
+}
+
 // Does the work for a job and records the outcome. Never throws.
 export async function runJob(jobId: string) {
   const job = await getJob(jobId)
   if (!job || job.status !== "queued") return
   await jobs.doc(jobId).update({ status: "running", startedAt: new Date().toISOString() })
   const { logger, close } = jobLogger(jobId)
+  // Shows the job is alive during long AI calls, so it isn't mistaken for a stuck one.
+  const heartbeat = setInterval(() => {
+    jobs.doc(jobId).update({ heartbeatAt: new Date().toISOString() }).catch(() => {})
+  }, 60_000)
   try {
     const user = await userById(job.uid)
     if (!user) throw new Error("The user who started this job is no longer signed in to npxhub")
@@ -112,7 +120,9 @@ export async function runJob(jobId: string) {
     await jobs.doc(jobId).update({ status: "succeeded", finishedAt: new Date().toISOString(), ...result })
   } catch (e) {
     await close((e as Error).message)
-    await jobs.doc(jobId).update({ status: "failed", finishedAt: new Date().toISOString(), error: (e as Error).message })
+    await failJob(jobId, (e as Error).message)
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 

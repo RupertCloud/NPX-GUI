@@ -1,3 +1,4 @@
+import { safeNext } from "@/lib/safe-next"
 import { LoginButton } from "./login-button"
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ next?: string }> }) {
@@ -9,7 +10,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <p className="mt-2 text-muted-foreground">
           Publish your GitHub packages to npm, with pre-flight checks and a verified install.
         </p>
-        <LoginButton next={next?.startsWith("/") && !next.startsWith("//") ? next : "/packages"} />
+        <LoginButton next={safeNext(next)} />
         <p className="mt-6 text-xs text-muted-foreground">
           npxhub asks for GitHub <code>repo</code> and <code>workflow</code> access to read package.json, open the
           publish-workflow PR, set your NPM_TOKEN secret and start releases.

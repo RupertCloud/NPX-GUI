@@ -104,7 +104,7 @@ function JobConsole({ job }: { job: JobView }) {
     <LogConsole
       count={`${logs.length} ${logs.length === 1 ? "entry" : "entries"}`}
       active={active}
-      size={logs.reduce((n, l) => n + l.text.length, 0)}
+      tail={`${logs.length}:${logs[logs.length - 1]?.text.slice(-200) ?? ""}`}
     >
       {logs.length === 0 && <div className="text-[#9c9a92]">Waiting for the job to start…</div>}
       {logs.map((l, i) => (
