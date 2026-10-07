@@ -11,6 +11,8 @@ test("jobs: stale detection and runner token", async () => {
   assert.equal(effectiveStatus({ ...base, status: "running", createdAt: "2026-09-29T11:00:00Z", startedAt: "2026-09-29T11:30:00Z" }, now), "failed")
   assert.equal(effectiveStatus({ ...base, status: "queued", createdAt: "2026-09-29T11:00:00Z" }, now), "failed")
   assert.equal(effectiveStatus({ ...base, status: "succeeded", createdAt: "2026-09-29T01:00:00Z" }, now), "succeeded")
+  // A long job that keeps sending heartbeats is still running.
+  assert.equal(effectiveStatus({ ...base, status: "running", createdAt: "2026-09-29T11:00:00Z", startedAt: "2026-09-29T11:00:05Z", heartbeatAt: "2026-09-29T11:59:00Z" }, now), "running")
   assert.ok(checkRunnerToken("j1", runnerToken("j1")))
   assert.ok(!checkRunnerToken("j2", runnerToken("j1")))
   assert.ok(!checkRunnerToken("j1", null))

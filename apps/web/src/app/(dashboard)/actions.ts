@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 import { headers } from "next/headers"
-import { redirect } from "next/navigation"
+import { redirect, unstable_rethrow } from "next/navigation"
 import {
   createPackage,
   createRelease,
@@ -15,6 +15,7 @@ import {
   updatePackage,
   updateRelease,
   type Package,
+  type Release,
   type Role,
 } from "@/lib/data"
 import {
@@ -36,19 +37,22 @@ import { compare, gitTagFor, isValidDistTag, isValidVersion } from "@/lib/releas
 import { requireUser, type User } from "@/lib/session"
 import { isCurrentWorkflow, WORKFLOW_PATH } from "@/lib/workflow"
 import { FieldValue } from "firebase-admin/firestore"
-import { checkBaseUrl, DEFAULT_MODEL, getAiSettings, testAi, type StoredAiSettings } from "@/lib/ai"
+import { checkBaseUrl, checkBaseUrlHost, DEFAULT_MODEL, getAiSettings, testAi, type StoredAiSettings } from "@/lib/ai"
 import { encrypt } from "@/lib/crypto"
 import { db } from "@/lib/firebase/admin"
-import { createJob, kickOff, type JobKind } from "@/lib/jobs"
-import { releaseLogToken } from "@/lib/job-utils"
-import { fixPrBody } from "@/lib/fix"
+import { createJob, failJob, kickOff, type JobKind } from "@/lib/jobs"
+import { fixConflict, fixPrBody } from "@/lib/fix"
 
 export type ActionResult = { error?: string; ok?: string } | undefined
 
-const message = (e: unknown) =>
-  e instanceof GitHubError && e.status === 403
+// Error text for the user. Lets Next.js control flow through, such as requireUser()'s redirect to the
+// login page when the session expired, instead of showing it as an error.
+function message(e: unknown) {
+  unstable_rethrow(e)
+  return e instanceof GitHubError && e.status === 403
     ? `GitHub denied this: ${e.message}. You may need admin rights on the repo.`
     : (e as Error).message
+}
 
 async function packageFor(user: User, id: string, role?: Role): Promise<Package> {
   const pkg = await getPackage(user, id)
@@ -131,7 +135,13 @@ async function origin() {
 async function startJob(user: User, kind: JobKind, target: string, packageId: string): Promise<ActionResult> {
   const job = await createJob(user, kind, target, packageId)
   if ("active" in job) return { ok: "Already running. It continues in the background." }
-  await kickOff(job.id, await origin())
+  try {
+    await kickOff(job.id, await origin())
+  } catch (e) {
+    // Otherwise the job would sit in "queued" until it is considered stale.
+    await failJob(job.id, (e as Error).message)
+    throw e
+  }
   return { ok: "Started. It keeps running if you leave or refresh this page." }
 }
 
@@ -156,7 +166,7 @@ export async function saveAiSettings(_prev: ActionResult, formData: FormData): P
     const baseUrl = String(formData.get("baseUrl") ?? "").trim()
     const model = String(formData.get("model") ?? "").trim() || DEFAULT_MODEL[provider]
     const apiKey = String(formData.get("apiKey") ?? "").trim()
-    const badUrl = checkBaseUrl(baseUrl)
+    const badUrl = checkBaseUrl(baseUrl) ?? (await checkBaseUrlHost(baseUrl))
     if (badUrl) return { error: badUrl }
     if (!model) return { error: "Enter a model name" }
     if (!/^[\w.:/@-]{1,200}$/.test(model)) return { error: "That model name has unexpected characters" }
@@ -224,6 +234,15 @@ async function releaseAndPackage(user: User, id: string) {
   return { release, pkg }
 }
 
+// Why a release can't be run again right now, or null when it can.
+async function retryBlocker(user: User, pkg: Package, release: Release): Promise<string | null> {
+  if (release.status !== "failed" && release.status !== "cancelled") return "Only failed or cancelled releases can be retried"
+  if (!isCurrentWorkflow(await getFile(user.githubToken, pkg.repo, WORKFLOW_PATH, release.branch))) {
+    return "The publish workflow on this branch is missing or outdated. Update it from the package page, then retry."
+  }
+  return null
+}
+
 // Applies the AI's proposed fix: as a PR, or committed straight to the release branch and released again.
 export async function applyFix(id: string, mode: "pr" | "commit"): Promise<ActionResult> {
   let next: string | null = null
@@ -232,6 +251,16 @@ export async function applyFix(id: string, mode: "pr" | "commit"): Promise<Actio
     const { release, pkg } = await releaseAndPackage(user, id)
     const fix = release.fix
     if (!fix?.edits?.length) return { error: "No proposed changes to apply" }
+    if (fix.commitSha) return { error: `Already committed as ${fix.commitSha.slice(0, 7)}` }
+    if (fix.prUrl) return { error: "A PR for this fix already exists; merge it instead" }
+    if (mode === "commit") {
+      const blocker = await retryBlocker(user, pkg, release)
+      if (blocker) return { error: blocker }
+    }
+    // The proposal holds whole files; refuse if any of them changed on the branch since the diagnosis.
+    const conflict = await fixConflict(user.githubToken, pkg.repo, release.branch, fix.edits)
+    if (conflict) return { error: `${conflict} changed since the diagnosis. Ask the AI again so the fix is based on the current code.` }
+
     const files = fix.edits.map((e) => ({ path: e.path, content: e.content }))
     const title = `Fix release of ${release.npmName}@${release.version}`
     if (mode === "pr") {
@@ -250,7 +279,11 @@ export async function applyFix(id: string, mode: "pr" | "commit"): Promise<Actio
       sha = await commitFiles(user.githubToken, pkg.repo, release.branch, files, `fix: ${title.toLowerCase()} (npxhub AI)`)
     } catch (e) {
       if (e instanceof GitHubError && (e.status === 409 || e.status === 422)) {
-        return { error: `${release.branch} doesn't accept direct commits (branch protection). Use "Open PR" instead.` }
+        if (/protected/i.test(e.message)) {
+          return { error: `${release.branch} doesn't accept direct commits (branch protection). Use "Open PR" instead.` }
+        }
+        if (/fast.?forward/i.test(e.message)) return { error: `${release.branch} moved while committing. Try again.` }
+        return { error: `GitHub rejected the commit: ${e.message}` }
       }
       throw e
     }
@@ -270,10 +303,19 @@ export async function mergeFixPr(id: string, retry = false): Promise<ActionResul
   try {
     const user = await requireUser()
     const { release, pkg } = await releaseAndPackage(user, id)
-    const number = release.fix?.prUrl ? pullNumber(release.fix.prUrl, pkg.repo) : null
-    if (!number) return { error: "No fix PR to merge" }
-    await mergePull(user.githubToken, pkg.repo, number)
+    const fix = release.fix
+    const number = fix?.prUrl ? pullNumber(fix.prUrl, pkg.repo) : null
+    if (!fix || !number) return { error: "No fix PR to merge" }
+    if (retry) {
+      const blocker = await retryBlocker(user, pkg, release)
+      if (blocker) return { error: blocker }
+    }
+    if (!fix.mergedAt) {
+      await mergePull(user.githubToken, pkg.repo, number)
+      await updateRelease(id, { fix: { ...fix, mergedAt: new Date().toISOString() } })
+    }
     revalidatePath(`/releases/${id}`)
+    revalidatePath("/packages")
     if (!retry) return { ok: "Merged. Retry the release when ready." }
     const result = await launchRelease(user, pkg, release)
     if ("error" in result) return { error: `Merged, but the retry didn't start: ${result.error}` }
@@ -381,7 +423,6 @@ async function launchRelease(user: User, pkg: Package, input: ReleaseInput): Pro
       provenance: !pkg.private,
       release_id: created.id,
       log_url: `${await origin()}/api/releases/${created.id}/log`,
-      log_token: releaseLogToken(created.id),
     })
     await updateRelease(created.id, { status: "running" })
   } catch (e) {
@@ -417,11 +458,8 @@ export async function retryRelease(id: string): Promise<ActionResult> {
     const previous = await getRelease(id)
     const pkg = previous && (await getPackage(user, previous.packageId))
     if (!previous || !pkg) return { error: "Release not found" }
-    if (previous.status !== "failed" && previous.status !== "cancelled")
-      return { error: "Only failed or cancelled releases can be retried" }
-    if (!isCurrentWorkflow(await getFile(user.githubToken, pkg.repo, WORKFLOW_PATH, previous.branch))) {
-      return { error: "The publish workflow on this branch is missing or outdated. Update it from the package page, then retry." }
-    }
+    const blocker = await retryBlocker(user, pkg, previous)
+    if (blocker) return { error: blocker }
     const result = await launchRelease(user, pkg, previous)
     if ("error" in result) return result
     releaseId = result.id

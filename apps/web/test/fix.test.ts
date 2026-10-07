@@ -21,6 +21,11 @@ test("validateEdits: edits to shown files and new files inside the package only"
     "."
   )
   assert.deepEqual(out.map((x) => [x.path, x.isNew]), [["package.json", false], [".npmignore", true]])
+  // Duplicate paths keep only the first edit, and edits of shown files remember the SHA they were based on.
+  const dup = validateEdits([e(".npmignore", "a"), e(".npmignore", "b")], [], new Set(), ".")
+  assert.deepEqual(dup.map((x) => x.content), ["a"])
+  const based = validateEdits([e("package.json", "{}")], [{ ...shown[0], sha: "abc123" }], existing, ".")
+  assert.equal(based[0].baseSha, "abc123")
   // An unchanged shown file is dropped.
   assert.equal(validateEdits([e("package.json", '{"name":"a"}')], shown, existing, ".").length, 0)
   // In a monorepo package, new files must stay inside its directory.

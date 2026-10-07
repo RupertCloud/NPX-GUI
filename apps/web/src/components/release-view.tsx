@@ -192,10 +192,11 @@ function ReleaseConsole({ release }: { release: Release }) {
   const live = release.liveLog ?? {}
   const steps = Object.keys(live).map(Number).sort((a, b) => a - b)
   const running = release.status === "queued" || release.status === "running"
-  const size = steps.reduce((n, s) => n + live[s].length, 0)
+  const last = steps[steps.length - 1]
+  const tail = last ? `${last}:${live[last].slice(-200)}` : ""
   if (!steps.length && !running) return null
   return (
-    <LogConsole count={steps.length ? `${steps.length} of ${RELEASE_STEPS.length} steps` : "waiting"} active={running} size={size}>
+    <LogConsole count={steps.length ? `${steps.length} of ${RELEASE_STEPS.length} steps` : "waiting"} active={running} tail={tail}>
       {!steps.length && (
         <div className="text-[#9c9a92]">
           Waiting for output… Live output needs the current npxhub workflow; older workflows only show the full log when the run
@@ -243,6 +244,13 @@ function FixProposal({ release }: { release: Release }) {
       )}
       {fix.commitSha ? (
         <p className="text-success">Committed {fix.commitSha.slice(0, 7)} to {release.branch} and released again.</p>
+      ) : fix.prUrl && fix.mergedAt ? (
+        <p className="text-success">
+          <a href={fix.prUrl} className="underline" target="_blank" rel="noreferrer">
+            Fix PR
+          </a>{" "}
+          merged. Use Retry release to publish with it.
+        </p>
       ) : fix.prUrl ? (
         <div className="flex flex-wrap items-center gap-2">
           <a href={fix.prUrl} className="mr-2 underline" target="_blank" rel="noreferrer">

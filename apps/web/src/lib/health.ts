@@ -39,7 +39,7 @@ export async function nextStep(token: string, pkg: Package, lastRelease: Release
     if (secret === false) return { kind: "token" }
     if (lastRelease?.status === "failed" && lastRelease.runId) {
       const fix = lastRelease.fix
-      if (fix?.edits?.length && !fix.commitSha) return { kind: "review-fix", releaseId: lastRelease.id }
+      if (fix?.edits?.length && !fix.commitSha && !fix.mergedAt) return { kind: "review-fix", releaseId: lastRelease.id }
       if (!fix) return { kind: "fix", releaseId: lastRelease.id, version: lastRelease.version }
     }
     if (manifest && !manifest.bin) {

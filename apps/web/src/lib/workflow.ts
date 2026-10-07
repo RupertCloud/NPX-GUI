@@ -16,44 +16,69 @@ export const RELEASE_STEPS = [
 ] as const
 
 // Bump when the template changes; repos with an older marker are offered an update PR.
-export const WORKFLOW_VERSION = 3
+export const WORKFLOW_VERSION = 4
 export const WORKFLOW_MARKER = `# npxhub-workflow: v${WORKFLOW_VERSION}`
 
 export const isCurrentWorkflow = (content: string | null) => !!content?.includes(WORKFLOW_MARKER)
 
 // Runs a workflow step with bash, mirrors its output to the GitHub log, and sends it to npxhub
-// every 2 seconds so the release page can show it live. Values of env vars whose names contain
-// TOKEN, SECRET, PASSWORD or KEY are replaced with ***. Sending problems never affect the step.
+// every 2 seconds so the release page can show it live. Requests are authenticated with the run's
+// GitHub OIDC token (audience "npxhub"), so no secret is passed to the workflow. Values of env vars
+// whose names contain TOKEN, SECRET, PASSWORD or KEY are replaced with ***. Sending problems never
+// affect the step.
 export const LOG_HELPER_JS = String.raw`"use strict"
 const { spawn } = require("node:child_process")
 const step = Number(process.argv[2])
 const script = process.argv[3]
 const url = process.env.NPXHUB_LOG_URL
-const token = process.env.NPXHUB_LOG_TOKEN
+const idUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL
+const idRequestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
 const secrets = Object.keys(process.env)
   .filter((k) => ["TOKEN", "SECRET", "PASSWORD", "KEY"].some((s) => k.toUpperCase().includes(s)))
   .map((k) => process.env[k])
   .filter((v) => v && v.length >= 8)
 let pending = ""
 let queue = Promise.resolve()
+let oidc = null
+let oidcAt = 0
+async function auth() {
+  if (oidc && Date.now() - oidcAt < 240000) return oidc
+  const res = await fetch(idUrl + "&audience=npxhub", {
+    headers: { authorization: "bearer " + idRequestToken },
+    signal: AbortSignal.timeout(10000),
+  })
+  oidc = (await res.json()).value
+  oidcAt = Date.now()
+  return oidc
+}
 function redact(text) {
   for (const s of secrets) text = text.split(s).join("***")
   return text
 }
 function send(final) {
   const cut = final ? pending.length : pending.lastIndexOf("\n") + 1
-  if (!url || cut === 0) return queue
+  if (!url || !idUrl || cut === 0) return queue
   const text = redact(pending.slice(0, cut))
   pending = pending.slice(cut)
   const body = JSON.stringify({ step: step, text: text })
-  const headers = { "content-type": "application/json", "x-npxhub-log-token": token }
   queue = queue
-    .then(() => fetch(url, { method: "POST", headers: headers, body: body, signal: AbortSignal.timeout(10000) }))
+    .then(() => auth())
+    .then((jwt) =>
+      fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer " + jwt },
+        body: body,
+        signal: AbortSignal.timeout(10000),
+      })
+    )
     .catch(() => {})
   return queue
 }
 const timer = setInterval(() => send(false), 2000)
 const child = spawn("bash", ["--noprofile", "--norc", "-eo", "pipefail", script], { stdio: ["inherit", "pipe", "pipe"] })
+// Decode as UTF-8 so characters split across chunks (✓, emoji) stay intact.
+child.stdout.setEncoding("utf8")
+child.stderr.setEncoding("utf8")
 child.stdout.on("data", (d) => {
   process.stdout.write(d)
   pending += d
@@ -91,7 +116,6 @@ on:
       provenance: { description: "Publish with provenance", required: false, type: boolean, default: false }
       release_id: { description: "npxhub release id", required: true, type: string }
       log_url: { description: "Where to send live step output", required: false, type: string, default: "" }
-      log_token: { description: "Token for log_url", required: false, type: string, default: "" }
 
 permissions:
   contents: write
@@ -114,7 +138,6 @@ jobs:
       GIT_TAG: \${{ inputs.git_tag }}
       NOTES: \${{ inputs.notes }}
       NPXHUB_LOG_URL: \${{ inputs.log_url }}
-      NPXHUB_LOG_TOKEN: \${{ inputs.log_token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -129,7 +152,6 @@ jobs:
 
       - name: Set up npxhub log
         run: |
-          if [ -n "$NPXHUB_LOG_TOKEN" ]; then echo "::add-mask::$NPXHUB_LOG_TOKEN"; fi
           cat > /tmp/npxhub-log.cjs <<'NPXHUB_EOF'
 ${indent(LOG_HELPER_JS, 10)}
           NPXHUB_EOF

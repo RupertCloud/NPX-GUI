@@ -22,15 +22,17 @@ export type Job = {
   logs?: LogLine[]
   createdAt: string
   startedAt?: string
+  heartbeatAt?: string // updated every minute while the job runs
   finishedAt?: string
 }
 
 const STALE_MS = 15 * 60_000
 
-// A queued or running job that stopped reporting is treated as failed.
+// A queued or running job with no sign of life (heartbeat) for 15 minutes is treated as failed.
 export function effectiveStatus(job: Job, now = Date.now()): JobStatus {
   if (job.status !== "queued" && job.status !== "running") return job.status
-  return now - new Date(job.startedAt ?? job.createdAt).getTime() > STALE_MS ? "failed" : job.status
+  const lastSign = [job.createdAt, job.startedAt, job.heartbeatAt].filter(Boolean).map((t) => new Date(t!).getTime())
+  return now - Math.max(...lastSign) > STALE_MS ? "failed" : job.status
 }
 
 export function runnerToken(jobId: string) {
@@ -39,15 +41,6 @@ export function runnerToken(jobId: string) {
 
 export function checkRunnerToken(jobId: string, token: string | null) {
   return safeEqual(runnerToken(jobId), token)
-}
-
-// Lets a release's workflow send its step output to npxhub, for that release only.
-export function releaseLogToken(releaseId: string) {
-  return createHmac("sha256", Buffer.from(process.env.TOKEN_ENCRYPTION_KEY ?? "", "base64")).update(`release-log:${releaseId}`).digest("hex")
-}
-
-export function checkReleaseLogToken(releaseId: string, token: string | null) {
-  return safeEqual(releaseLogToken(releaseId), token)
 }
 
 function safeEqual(expected: string, token: string | null) {

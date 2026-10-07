@@ -33,6 +33,32 @@ export function checkBaseUrl(raw: string): string | null {
   return null
 }
 
+// True for addresses that must not be reachable through a user-supplied URL (loopback, private, link-local, metadata).
+export function isPrivateAddress(ip: string): boolean {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(v4)
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])]
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224
+  }
+  const v6 = ip.toLowerCase()
+  return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6)
+}
+
+// Resolves a custom base URL's host and refuses private addresses (blocks DNS names that point inside the network).
+export async function checkBaseUrlHost(raw: string): Promise<string | null> {
+  if (!raw) return null
+  const { lookup } = await import("node:dns/promises")
+  try {
+    const addresses = await lookup(new URL(raw).hostname, { all: true })
+    if (addresses.some((a) => isPrivateAddress(a.address))) return "Base URL must point to a public address"
+  } catch {
+    return "Base URL host can't be resolved"
+  }
+  return null
+}
+
 export async function getAiSettings(uid: string): Promise<AiSettings | null> {
   const ai = (await db.collection("users").doc(uid).get()).data()?.ai as StoredAiSettings | undefined
   if (!ai?.keyEnc) return null
@@ -50,6 +76,12 @@ export async function generateJson<T extends z.ZodType>(
   schema: T,
   log: AiLog = () => {}
 ): Promise<z.infer<T>> {
+  // Re-checked on every call, since DNS can change after the URL was saved. Skipped outside production so
+  // local development and tests can use local servers.
+  if (process.env.NODE_ENV === "production") {
+    const badHost = await checkBaseUrlHost(ai.baseUrl)
+    if (badHost) throw new AiError(badHost)
+  }
   return ai.provider === "anthropic" ? anthropicJson(ai, system, prompt, schema, log) : openAiJson(ai, system, prompt, schema, log)
 }
 

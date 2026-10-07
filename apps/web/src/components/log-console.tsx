@@ -7,13 +7,13 @@ export function LogConsole({
   title = "Console",
   count,
   active,
-  size,
+  tail,
   children,
 }: {
   title?: string
   count: string
   active: boolean
-  size: number // grows with the content; used to follow new output
+  tail: string // end of the content; changes whenever output is added, even once older output is trimmed
   children: React.ReactNode
 }) {
   const [open, setOpen] = useState(active)
@@ -21,7 +21,7 @@ export function LogConsole({
 
   useEffect(() => {
     if (open) end.current?.scrollIntoView({ block: "nearest" })
-  }, [size, open])
+  }, [tail, open])
 
   return (
     <details open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)} className="rounded-lg border">

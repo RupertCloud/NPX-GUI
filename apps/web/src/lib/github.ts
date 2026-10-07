@@ -58,12 +58,17 @@ export async function listBranches(token: string, repo: string) {
 }
 
 export async function getFile(token: string, repo: string, path: string, ref: string): Promise<string | null> {
+  return (await getFileEntry(token, repo, path, ref))?.content ?? null
+}
+
+// A file's content and blob SHA, or null when it doesn't exist.
+export async function getFileEntry(token: string, repo: string, path: string, ref: string): Promise<{ content: string; sha: string } | null> {
   try {
-    const file = await gh<{ content: string }>(
+    const file = await gh<{ content: string; sha: string }>(
       token,
       `/repos/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`
     )
-    return Buffer.from(file.content, "base64").toString("utf8")
+    return { content: Buffer.from(file.content, "base64").toString("utf8"), sha: file.sha }
   } catch (e) {
     if (is404(e)) return null
     throw e
@@ -133,9 +138,12 @@ export async function commitFiles(token: string, repo: string, branch: string, f
   const ref = `/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`
   const head = (await gh<{ object: { sha: string } }>(token, ref.replace("/refs/", "/ref/"))).object.sha
   const baseTree = (await gh<{ tree: { sha: string } }>(token, `/repos/${repo}/git/commits/${head}`)).tree.sha
+  // Keep existing files' modes (an executable script must stay executable); new files are regular files.
+  const { tree: entries } = await gh<{ tree: { path: string; mode: string }[] }>(token, `/repos/${repo}/git/trees/${baseTree}?recursive=1`)
+  const modeOf = (path: string) => entries.find((t) => t.path === path)?.mode ?? "100644"
   const tree = await gh<{ sha: string }>(token, `/repos/${repo}/git/trees`, {
     method: "POST",
-    body: JSON.stringify({ base_tree: baseTree, tree: files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.content })) }),
+    body: JSON.stringify({ base_tree: baseTree, tree: files.map((f) => ({ path: f.path, mode: modeOf(f.path), type: "blob", content: f.content })) }),
   })
   const commit = await gh<{ sha: string }>(token, `/repos/${repo}/git/commits`, {
     method: "POST",

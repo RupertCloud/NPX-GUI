@@ -9,17 +9,31 @@ import { test } from "node:test"
 import { LOG_HELPER_JS, WORKFLOW_YAML } from "../src/lib/workflow"
 
 async function logServer() {
-  const posts: { step: number; text: string; token: string }[] = []
+  const posts: { step: number; text: string; auth: string }[] = []
+  let tokenRequests = 0
   const server = http.createServer((req, res) => {
+    // Stands in for GitHub's OIDC token endpoint (ACTIONS_ID_TOKEN_REQUEST_URL) and npxhub's log endpoint.
+    if (req.url!.startsWith("/oidc")) {
+      tokenRequests++
+      assert.equal(req.headers.authorization, "bearer request-token-xyz")
+      assert.match(req.url!, /audience=npxhub/)
+      return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ value: "jwt-from-github" }))
+    }
     let raw = ""
     req.on("data", (c) => (raw += c))
     req.on("end", () => {
-      posts.push({ ...JSON.parse(raw), token: req.headers["x-npxhub-log-token"] as string })
+      posts.push({ ...JSON.parse(raw), auth: req.headers.authorization as string })
       res.writeHead(204).end()
     })
   })
   await new Promise<void>((r) => server.listen(0, r))
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/log`, posts, close: () => (server.closeAllConnections(), server.close()) }
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  return {
+    env: { NPXHUB_LOG_URL: `${base}/log`, ACTIONS_ID_TOKEN_REQUEST_URL: `${base}/oidc?api-version=2.0`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-token-xyz" },
+    posts,
+    tokenRequests: () => tokenRequests,
+    close: () => (server.closeAllConnections(), server.close()),
+  }
 }
 
 function runStep(script: string, env: Record<string, string>) {
@@ -38,21 +52,21 @@ test("log helper streams step output, redacts secrets and keeps the exit code", 
   const srv = await logServer()
   try {
     const ok = await runStep('echo "installing"\necho "token is $NODE_AUTH_TOKEN" >&2\nsleep 2.5\necho "tests passed"\n', {
-      NPXHUB_LOG_URL: srv.url,
-      NPXHUB_LOG_TOKEN: "log-token-123456",
+      ...srv.env,
       NODE_AUTH_TOKEN: "npm_supersecretvalue",
     })
     assert.equal(ok.code, 0)
     assert.match(ok.stdout, /installing[\s\S]*tests passed/) // still mirrored to the GitHub log
     const text = srv.posts.map((p) => p.text).join("")
     assert.ok(srv.posts.length >= 2, "sends while the step runs, not only at the end")
-    assert.ok(srv.posts.every((p) => p.step === 3 && p.token === "log-token-123456"))
+    assert.ok(srv.posts.every((p) => p.step === 3 && p.auth === "Bearer jwt-from-github"))
+    assert.equal(srv.tokenRequests(), 1) // the OIDC token is reused between sends
     assert.match(text, /installing/)
     assert.match(text, /token is \*\*\*/)
     assert.doesNotMatch(text, /supersecret/)
 
     srv.posts.length = 0
-    const failed = await runStep('echo "building"\nfalse\necho "not reached"\n', { NPXHUB_LOG_URL: srv.url, NPXHUB_LOG_TOKEN: "t" })
+    const failed = await runStep('echo "building"\nfalse\necho "not reached"\n', srv.env)
     assert.equal(failed.code, 1) // -eo pipefail, like GitHub's default bash
     assert.match(srv.posts.map((p) => p.text).join(""), /building[\s\S]*exited with code 1/)
     assert.doesNotMatch(failed.stdout, /not reached/)
@@ -62,13 +76,32 @@ test("log helper streams step output, redacts secrets and keeps the exit code", 
 })
 
 test("log helper never fails the step when npxhub is unreachable", async () => {
-  const r = await runStep('echo "hello"\n', { NPXHUB_LOG_URL: "http://127.0.0.1:9/nothing", NPXHUB_LOG_TOKEN: "t" })
+  const r = await runStep('echo "hello"\n', {
+    NPXHUB_LOG_URL: "http://127.0.0.1:9/nothing",
+    ACTIONS_ID_TOKEN_REQUEST_URL: "http://127.0.0.1:9/oidc?x=1",
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: "t",
+  })
   assert.equal(r.code, 0)
   const noUrl = await runStep('echo "hello"\n', { NPXHUB_LOG_URL: "" })
   assert.equal(noUrl.code, 0)
 })
 
-test("workflow v3 wraps every run step with the log helper", () => {
+test("log helper keeps multi-byte characters intact across chunks", async () => {
+  const srv = await logServer()
+  try {
+    // Enough output that the pipe delivers it in several chunks; ✓ is 3 bytes in UTF-8.
+    await runStep('for i in $(seq 1 4000); do printf "✓ test %s passed\\n" "$i"; done\n', srv.env)
+    const text = srv.posts.map((p) => p.text).join("")
+    assert.ok(text.includes("✓ test 4000 passed"))
+    assert.ok(!text.includes("\uFFFD"), "no replacement characters")
+  } finally {
+    srv.close()
+  }
+})
+
+test("workflow v4 wraps every run step and passes no log secret", () => {
   for (const n of [2, 3, 4, 5, 6]) assert.ok(WORKFLOW_YAML.includes(`shell: node /tmp/npxhub-log.cjs ${n} {0}`))
-  assert.ok(WORKFLOW_YAML.includes("# npxhub-workflow: v3"))
+  assert.ok(WORKFLOW_YAML.includes("# npxhub-workflow: v4"))
+  assert.ok(!/log_token|NPXHUB_LOG_TOKEN/.test(WORKFLOW_YAML))
+  assert.ok(WORKFLOW_YAML.includes("id-token: write"))
 })
